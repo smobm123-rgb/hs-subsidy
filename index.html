@@ -159,6 +159,15 @@ textarea.pf.box{background:rgba(120,190,255,.18);outline:1px dashed #6aa6e8;resi
 #gate[hidden]{display:none}
 .gate-box{background:#fff;border-radius:12px;padding:26px 28px;max-width:460px;width:100%;box-shadow:0 10px 40px rgba(0,0,0,.3)}
 .gate-box h2{font-size:18px}
+.gate-box.wide{max-width:980px;max-height:92vh;display:flex;flex-direction:column}
+.imp-scroll{overflow:auto;flex:1;min-height:0;border:1px solid var(--line);border-radius:8px}
+.gate-box.wide .imp{display:flex;flex-direction:column;min-height:0;max-height:calc(92vh - 52px)}
+.imp-scroll th[colspan]{background:#eef3fb;color:var(--pri);font-size:13px}
+.imp-scroll td{vertical-align:top}
+.imp-scroll td input:not([type=checkbox]),.imp-scroll td textarea{width:100%}
+tr.imp-diff td:nth-child(3){background:#fffbea}
+/* 인쇄 PDF 안에 넣는 데이터(보이지 않음, PDF 불러오기용) */
+.pdata{position:absolute;left:8pt;top:1pt;width:575pt;font:1px/1.1 monospace;color:#fff;word-break:break-all;pointer-events:none;user-select:none;z-index:0}
 #who{font-size:12px;opacity:.9;display:flex;align-items:center;gap:6px}
 #who button{padding:2px 8px;font-size:11px}
 .of-note{font-family:"Malgun Gothic",sans-serif;font-size:9pt;color:#b00;border:1px solid #b00;padding:3px 8px;margin-bottom:8px;display:inline-block}
@@ -592,7 +601,7 @@ function viewProjects() {
   }).join('');
   const tot = k => won(sum(ps, k));
   return `<div class="row" style="margin-bottom:14px"><div><h1>보조금 관리</h1><div class="muted">단체를 먼저 등록한 뒤, 단체별로 보조사업 신청서를 작성하세요. 단체 정보는 모든 서식에 자동으로 들어갑니다.</div></div><span class="sp"></span>
-    <a href="#/orgs/pick"><button class="pri">+ 새 보조사업 신청 (단체 선택)</button></a></div>
+    <button onclick="pickImport('new')">신청서 PDF로 새 사업 만들기</button><a href="#/orgs/pick"><button class="pri">+ 새 보조사업 신청 (단체 선택)</button></a></div>
   <div class="card" style="padding:0">
   ${ps.length ? `<div class="scroll"><table class="t"><thead><tr><th>연도</th><th>사업명</th><th>단체</th><th class="num">신청 보조금(원)</th><th class="num">교부결정액(원)</th><th class="num">교부액(원)</th><th class="num">정산 반환액(원)</th><th>단계</th><th class="num">바로가기</th></tr></thead>
     <tbody>${rows}</tbody>
@@ -758,6 +767,7 @@ const docBtn = (key, label) => `<button data-act="doc" data-doc="${key}">${label
 function stepApply(p, o) {
   const w = W(p), miss = orgMissing(o);
   return `
+  <div class="docbar"><b>불러오기</b><button onclick="pickImport('${p.id}')">단체가 낸 신청서 PDF 불러오기</button><span class="muted" style="font-size:12px">지원신청서·사업계획서·경비부담내역 내용을 읽어 이 사업에 채웁니다(반영 전 확인 화면).</span></div>
   <div class="docbar"><b>서식 출력</b>${docBtn('f1', '서식1 지원신청서')}${docBtn('f1_1', '서식1-1 사업계획서')}${docBtn('f1_2', '서식1-2 공익활동실적')}${docBtn('f1_3', '서식1-3 경비부담내역')}${docBtn('f1_4', '서식1-4 개인정보동의서')}${docBtn('applyAll', '신청서류 일괄')}</div>
   <div class="card autofill"><div class="row"><h2 style="margin:0">단체 정보 <span class="tag">자동 기입</span></h2><span class="sp"></span><a href="#/org/${o.id}"><button class="sm">단체 정보 수정</button></a></div>
     <dl class="kv" style="margin-top:10px">
@@ -1912,6 +1922,7 @@ function renderDoc() {
   $('#modePdf').classList.toggle('on', DOC_MODE === 'pdf' || !hasTable); $('#modeTable').classList.toggle('on', DOC_MODE !== 'pdf' && hasTable);
   $('#modePdf').disabled = !hasPdf; $('#modeTable').disabled = !hasTable;
   $('#boxBtn').classList.toggle('on', BOX_MODE);
+  embedPayload();
   $('#docHint').textContent = DOC_MODE === 'pdf' && hasPdf ? '모든 칸을 클릭해서 입력할 수 있습니다. 노랑=단체·사업 정보, 파랑 글씨=자동 계산(고치면 직접 수정값), 연노랑=빈칸, 네모=체크.' : '.docx는 한글에서 열어 \'다른 이름으로 저장 → 한글 문서(*.hwp)\'로 바꿀 수 있습니다.';
 }
 /* 서식 위에서 고친 값 → 같은 화면의 다른 칸(합계·날짜 등)도 다시 계산 */
@@ -2172,6 +2183,334 @@ function downloadXlsx() {
     {name: 'xl/styles.xml', text: styles},
     ...wsList.map((w, i) => ({name: `xl/worksheets/sheet${i + 1}.xml`, text: w.xml})),
   ]), exportName('xlsx'));
+}
+
+/* ================= 신청서 PDF 불러오기 =================
+   ① 이 프로그램에서 인쇄·PDF 저장한 파일: 첫 장 맨 위에 보이지 않는 글자(흰색 1px)로 입력 데이터를 넣어 두므로 그대로 복원
+   ② 한글·워드 등으로 원본 서식을 채워 PDF로 만든 파일: 항목 이름(단체명, 사업기간 …)의 위치를 찾아 옆·아래 칸의 글자를 읽음 */
+const PDFJS = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/';
+const b64 = {
+  enc: u8 => { let s = ''; for (let i = 0; i < u8.length; i += 0x8000) s += String.fromCharCode.apply(null, u8.subarray(i, i + 0x8000)); return btoa(s); },
+  dec: s => Uint8Array.from(atob(s), c => c.charCodeAt(0)),
+};
+async function gz(u8, de) { const s = new Blob([u8]).stream().pipeThrough(de ? new DecompressionStream('gzip') : new CompressionStream('gzip')); return new Uint8Array(await new Response(s).arrayBuffer()); }
+function applyPayload(p, o) {
+  const proj = {}; ['year', 'name', 'budgetName', 'dept', 'team', 'start', 'end', 'place', 'purpose', 'content', 'effect', 'beneficiary', 'applyDate', 'budget', 'burden', 'schedule', 'income'].forEach(k => proj[k] = p[k]);
+  proj.budget = (p.budget || []).map(r => ({item: r.item, calc: r.calc, subsidy: r.subsidy, self: r.self, other: r.other, method: r.method}));
+  const org = clone(o); delete org.id; delete org.history;
+  return {v: 1, org, project: proj};
+}
+let EMBED_SEQ = 0;
+async function embedPayload() {
+  const host = document.querySelector('#docbody .psheet, #docbody .sheet'); if (!host || !CUR.project || typeof CompressionStream === 'undefined') return;
+  const seq = ++EMBED_SEQ, json = JSON.stringify(applyPayload(CUR.project, orgOf(CUR.project)));
+  const data = b64.enc(await gz(new TextEncoder().encode(json))); if (seq !== EMBED_SEQ) return;
+  host.querySelector('.pdata')?.remove();
+  host.insertAdjacentHTML('afterbegin', `<div class="pdata" aria-hidden="true">HSDATA1[${data}]HSEND</div>`);
+}
+async function loadPdfJs() {
+  if (window.pdfjsLib) return window.pdfjsLib;
+  await loadScript(PDFJS + 'pdf.min.js');
+  pdfjsLib.GlobalWorkerOptions.workerSrc = PDFJS + 'pdf.worker.min.js';
+  return pdfjsLib;
+}
+/* PDF → 쪽마다 {lines:[{y0,y1,items:[{s,x0,x1,y0,y1}]}]} (좌표는 A4 폭 595pt 기준, 위→아래) */
+async function readPdf(file) {
+  const lib = await loadPdfJs();
+  const doc = await lib.getDocument({data: new Uint8Array(await file.arrayBuffer()), cMapUrl: PDFJS + 'cmaps/', cMapPacked: true, standardFontDataUrl: PDFJS + 'standard_fonts/'}).promise;
+  const pages = [];
+  for (let n = 1; n <= doc.numPages; n++) {
+    const pg = await doc.getPage(n), vp = pg.getViewport({scale: 1}), k = 595 / vp.width, tc = await pg.getTextContent();
+    const items = tc.items.filter(it => it.str && it.str.trim()).map(it => {
+      const [a, b, c, d, e, f] = lib.Util.transform(vp.transform, it.transform), h = Math.hypot(c, d) || it.height || 8;
+      return {s: it.str, x0: e * k, x1: (e + (it.width || 0)) * k, y1: f * k, y0: (f - h) * k};
+    });
+    items.forEach(it => { if (it.x1 <= it.x0) it.x1 = it.x0 + it.s.length * (it.y1 - it.y0) * 0.9; });
+    items.sort((a, b) => a.y1 - b.y1 || a.x0 - b.x0);
+    const lines = [];
+    for (const it of items) {
+      const L = lines.find(l => Math.abs(l.y1 - it.y1) < 2.5);
+      if (L) { L.items.push(it); L.y0 = Math.min(L.y0, it.y0); } else lines.push({y0: it.y0, y1: it.y1, items: [it]});
+    }
+    lines.forEach(l => { l.items.sort((a, b) => a.x0 - b.x0); l.t = l.items.map(i => i.s).join(''); l.n = l.t.replace(/\s+/g, ''); });
+    pages.push({lines, raw: items});
+  }
+  return pages;
+}
+async function findPayload(pages) {
+  for (const pg of pages) {
+    const all = pg.raw.slice().sort((a, b) => a.y0 - b.y0 || a.x0 - b.x0).map(i => i.s).join('').replace(/\s+/g, '');
+    const m = all.match(/HSDATA1\[([A-Za-z0-9+/=]+)\]HSEND/);
+    if (m) { try { return JSON.parse(new TextDecoder().decode(await gz(b64.dec(m[1]), true))); } catch (e) { /* 손상 → ② 방식으로 */ } }
+  }
+  return null;
+}
+/* ---- ② 항목 이름 기준 읽기 ---- */
+const nz = s => (s || '').replace(/\s+/g, '');
+const toNum = s => { const m = String(s || '').replace(/[^\d.,-]/g, '').replace(/,/g, ''); return m && !isNaN(+m) ? +m : ''; };
+const chunToWon = s => { const v = toNum(s); return v === '' ? '' : Math.round(v * 1000); };
+function toDate(s) {
+  const m = String(s || '').match(/(20\d{2}|19\d{2})\s*[.\-년/]\s*(\d{1,2})\s*[.\-월/]\s*(\d{1,2})/);
+  return m ? `${m[1]}-${String(m[2]).padStart(2, '0')}-${String(m[3]).padStart(2, '0')}` : '';
+}
+function toPeriod(s) { const ds = [...String(s || '').matchAll(/(20\d{2})\s*[.\-년/]\s*(\d{1,2})\s*[.\-월/]\s*(\d{1,2})/g)].map(m => `${m[1]}-${String(m[2]).padStart(2, '0')}-${String(m[3]).padStart(2, '0')}`); return {start: ds[0] || '', end: ds[1] || ''}; }
+const unbullet = s => (s || '').split('\n').map(x => x.replace(/^\s*[∙·•▪○◦\-ㆍ]\s*/, '').trim()).filter(x => x && !/^\(.*기재\)?$/.test(x)).join('\n');
+/* 줄 목록에서 정규화된 글자(공백 제거)로 항목 이름 찾기: x 범위 제한 가능 */
+function findLabel(pg, re, o = {}) {
+  for (const l of pg.lines) {
+    if (o.yMin != null && l.y1 < o.yMin) continue;
+    // 줄 안의 연속된 item들을 이어 붙여 일치 위치 찾기
+    for (let i = 0; i < l.items.length; i++) {
+      let acc = '';
+      for (let j = i; j < Math.min(l.items.length, i + 8); j++) {
+        acc += nz(l.items[j].s);
+        if (re.test(acc)) {
+          const x0 = l.items[i].x0, x1 = l.items[j].x1;
+          if (o.xMin != null && x0 < o.xMin) break; if (o.xMax != null && x0 > o.xMax) break;
+          return {x0, x1, y0: Math.min(...l.items.slice(i, j + 1).map(t => t.y0)), y1: l.y1, c: (l.y0 + l.y1) / 2, line: l};
+        }
+      }
+    }
+  }
+  return null;
+}
+function textIn(pg, r) { // 사각형 안 글자를 줄 단위로
+  return pg.lines.map(l => l.items.filter(it => { const cx = (it.x0 + it.x1) / 2, cy = (it.y0 + it.y1) / 2; return cx >= r.x0 && cx <= r.x1 && cy >= r.y0 && cy <= r.y1; }).map(i => i.s).join('').trim()).filter(Boolean).join('\n');
+}
+function fitX(pairs) { // 원본 서식 x → 이 PDF x (직선 맞춤)
+  if (pairs.length < 2) return x => x + (pairs[0] ? pairs[0][1] - pairs[0][0] : 0);
+  const n = pairs.length, sx = sum(pairs.map(p => ({v: p[0]})), 'v'), sy = sum(pairs.map(p => ({v: p[1]})), 'v');
+  const sxx = sum(pairs.map(p => ({v: p[0] * p[0]})), 'v'), sxy = sum(pairs.map(p => ({v: p[0] * p[1]})), 'v');
+  const a = (n * sxy - sx * sy) / ((n * sxx - sx * sx) || 1), b = (sy - a * sx) / n;
+  return a > 0.5 && a < 1.5 ? x => a * x + b : x => x + (sy - sx) / n;
+}
+/* 세로로 늘어선 항목 이름들의 가운데 사이를 경계로 행 범위를 만들고, 그 행에서 x 범위 안 글자를 읽음 */
+function readColumn(pg, X, defs) {
+  const found = defs.map(d => ({...d, L: findLabel(pg, d.re, {xMin: X(d.lx) - 25, xMax: X(d.lx) + 40, yMin: d.after ? d.after.y1 : null})}));
+  const out = {};
+  found.forEach((d, i) => {
+    if (!d.L) return;
+    const prev = found.slice(0, i).reverse().find(f => f.L), next = found.slice(i + 1).find(f => f.L);
+    const top = prev ? (prev.L.c + d.L.c) / 2 : d.L.c - (next ? (next.L.c - d.L.c) / 2 : 12);
+    const bot = next ? (next.L.c + d.L.c) / 2 : d.L.c + (prev ? (d.L.c - prev.L.c) / 2 : 12);
+    out[d.k] = textIn(pg, {x0: Math.max(X(d.v0), d.L.x1 + 1), x1: X(d.v1), y0: top, y1: bot});
+  });
+  return out;
+}
+function rowsTable(pg, X, xs, y0, y1, keyCol = 0) { // 표 영역의 줄들을 열 경계로 나누어 행 만들기(이어지는 줄은 앞 행에 붙임)
+  const bx = xs.map(X), rows = [];
+  pg.lines.filter(l => l.y0 >= y0 && l.y1 <= y1).forEach(l => {
+    const cells = bx.slice(0, -1).map(() => '');
+    l.items.forEach(it => { const cx = (it.x0 + it.x1) / 2; const c = bx.findIndex((b, i) => i < bx.length - 1 && cx >= b && cx < bx[i + 1]); if (c >= 0) cells[c] += it.s; });
+    const tr = cells.map(c => c.trim());
+    if (!tr.some(Boolean)) return;
+    const numsOnly = tr.every((c, i) => i === keyCol || !c);
+    if (rows.length && !tr[keyCol] && !tr.slice(2).some(c => /\d/.test(c))) { tr.forEach((c, i) => { if (c) rows[rows.length - 1][i] += (rows[rows.length - 1][i] ? '\n' : '') + c; }); return; }
+    if (numsOnly && rows.length && !tr[keyCol]) return;
+    rows.push(tr);
+  });
+  return rows;
+}
+const PARSERS = {
+  // 서식1 지원신청서
+  f1: (pg) => {
+    // 원본 서식의 항목 이름 x 위치 ↔ 이 PDF의 위치로 좌우 배율·여백 맞춤(좌·우 열 모두 사용)
+    const anchors = [[/^단체명$/, 102, 260], [/^설립일$/, 102, 260], [/^신청사업명$/, 104, 260], [/소관부서$/, 336], [/^사업장소$/, 345], [/^E-?mail$/i, 405], [/^직위$/, 407]]
+      .map(([re, x, xm]) => { const L = findLabel(pg, re, xm ? {xMax: xm} : {xMin: 250}); return L ? [x, L.x0] : null; }).filter(Boolean);
+    const X = fitX(anchors);
+    const L = readColumn(pg, X, [
+      {k: 'org.name', re: /^단체명$/, lx: 87, v0: 173, v1: 362}, {k: 'org.founded', re: /^설립일$/, lx: 87, v0: 173, v1: 362}, {k: 'org.location', re: /^소재지$/, lx: 87, v0: 173, v1: 362},
+      {k: 'org.membersTotal', re: /^회원수$/, lx: 87, v0: 173, v1: 362}, {k: 'org.regDept', re: /^등록부처/, lx: 126, v0: 173, v1: 362}, {k: 'org.regDate', re: /^등록일$/, lx: 126, v0: 173, v1: 362},
+      {k: 'org.regNo', re: /^등록번호$/, lx: 126, v0: 173, v1: 362}, {k: 'org.rep.name', re: /^성명$/, lx: 126, v0: 173, v1: 362}, {k: 'org.rep.phone', re: /^휴대전화$/, lx: 126, v0: 173, v1: 362},
+      {k: 'org.rep.address', re: /^주소$/, lx: 126, v0: 173, v1: 538}, {k: 'name', re: /^신청사업명$/, lx: 87, v0: 173, v1: 329}, {k: 'period', re: /^사업기간$/, lx: 87, v0: 173, v1: 329},
+      {k: 'purpose', re: /^사업목적$/, lx: 87, v0: 173, v1: 538}, {k: 'content', re: /^사업내용$/, lx: 87, v0: 173, v1: 538}, {k: 'total', re: /^총사업비$/, lx: 87, v0: 173, v1: 329}]);
+    const R = readColumn(pg, X, [{k: 'org.mgr.name', re: /^성명$/, lx: 403, v0: 438, v1: 538}, {k: 'org.mgr.position', re: /^직위$/, lx: 403, v0: 438, v1: 538},
+      {k: 'org.mgr.phone', re: /^(휴대전화|휴대|휴)$/, lx: 403, v0: 438, v1: 538}, {k: 'org.mgr.email', re: /^E-?mail$/i, lx: 403, v0: 438, v1: 538}]);
+    const R2 = readColumn(pg, X, [{k: 'dept', re: /소관부서$/, lx: 331, v0: 403, v1: 538}, {k: 'place', re: /^사업장소$/, lx: 331, v0: 403, v1: 538},
+      {k: 'sub', re: /^보조금\(?신청액/, lx: 331, v0: 403, v1: 538}, {k: 'selfo', re: /^자부담등$/, lx: 331, v0: 403, v1: 538}]);
+    const r = {...L, ...R, ...R2}, out = {};
+    const keepS = ['org.name', 'org.location', 'org.regDept', 'org.regNo', 'org.rep.name', 'org.rep.phone', 'org.rep.address', 'org.mgr.name', 'org.mgr.position', 'org.mgr.phone', 'org.mgr.email', 'name', 'dept', 'place'];
+    keepS.forEach(k => { if (r[k]) out[k] = r[k].replace(/※[^\n]*?기재/g, '').replace(/\n/g, ' ').replace(/※.*$/, '').trim(); });
+    if (r['org.founded']) out['org.founded'] = toDate(r['org.founded']);
+    if (r['org.regDate']) out['org.regDate'] = toDate(r['org.regDate']);
+    if (r['org.membersTotal']) out['org.membersTotal'] = toNum(r['org.membersTotal']);
+    if (r.period) Object.assign(out, toPeriod(r.period));
+    if (r.purpose) out.purpose = unbullet(r.purpose);
+    if (r.content) out.content = unbullet(r.content);
+    const dl = pg.lines.find(l => /(20\d{2})년.*월.*일/.test(l.n) && !/설립|등록/.test(l.n)); if (dl) out.applyDate = toDate(dl.t);
+    const totals = {total: chunToWon((r.total || '').split('천원')[0]), sub: chunToWon((r.sub || '').split('천원')[0])};
+    return {fields: out, totals};
+  },
+  // 서식1-1 사업계획서(첫 장)
+  f1_1a: (pg) => {
+    const out = {};
+    const after = (re) => { const L = findLabel(pg, re); if (!L) return ''; return L.line.items.filter(i => i.x0 > L.x1 - 1).map(i => i.s).join('').replace(/^\s*:\s*/, '').trim(); };
+    const block = (re, stopRe) => { const L = findLabel(pg, re); if (!L) return ''; const S = stopRe && findLabel(pg, stopRe, {yMin: L.y1}); return pg.lines.filter(l => l.y0 > L.y1 - 1 && (!S || l.y1 < S.y0 + 1) && l !== L.line).map(l => l.t).join('\n'); };
+    const nm = after(/단체명:?$/); if (nm) out['org.name'] = nm;
+    const mb = unbullet(block(/^○?주된사업/, /^○?단체구성현황/)); if (mb) out['org.mainBiz'] = mb;
+    [['chair', /^회장:?$/], ['vice', /^부회장:?$/], ['secretary', /^총무:?$/]].forEach(([k, re]) => { const L = findLabel(pg, re); if (L) { const v = L.line.items.filter(i => i.x0 > L.x1 - 1 && i.x0 < L.x1 + 110).map(i => i.s).join('').replace(/^:/, '').trim(); if (v) out['org.officers.' + k] = v; } });
+    const H = findLabel(pg, /^정회원$/);
+    if (H) { const hdr = H.line.items, cols = ['계', '정회원', '준회원', '기타'].map(t => hdr.find(i => nz(i.s).startsWith(t[0]) && nz(hdr.map(x => x.s).join('')).includes(t)) ); const rowL = pg.lines.find(l => l.y0 > H.y1 && /\d/.test(l.n) && l.items.some(i => i.x0 > H.x0 - 120)); if (rowL) { const nums = rowL.items.filter(i => /^\d[\d,]*$/.test(nz(i.s)) && i.x0 > H.x0 - 120); ['membersTotal', 'membersRegular', 'membersAssoc', 'membersOther'].forEach((k, i) => { if (nums[i]) out['org.' + k] = toNum(nums[i].s); }); } }
+    const as = findLabel(pg, /자산현황/); if (as) { const t = as.line.t, m = t.match(/자산액\s*\(\s*([\d,]+)/), d = t.match(/부채액\s*\(\s*([\d,]+)/); if (m) out['org.assets'] = chunToWon(m[1]); if (d) out['org.debts'] = chunToWon(d[1]); }
+    const pn = after(/^○?사업명:?$/); if (pn) out.name = pn;
+    const pp = unbullet(block(/사업목적및지원필요성$/, /^○?사업기간/)); if (pp) out.purpose = pp;
+    const pd = after(/^○?사업기간:?$/); if (pd) Object.assign(out, toPeriod(pd));
+    const pl = after(/^○?사업장소:?$/); if (pl) out.place = pl;
+    const ct = unbullet(block(/^○?사업내용$/, /^○?사업효과/)); if (ct) out.content = ct;
+    const L = findLabel(pg, /^○?사업효과/); if (L) { const ef = unbullet(pg.lines.filter(l => l.y0 > L.y1 - 1 && l !== L.line && !/^-\d+-$/.test(l.n)).map(l => l.t).join('\n')); if (ef) out.effect = ef; }
+    return {fields: out};
+  },
+  // 서식1-1 사업계획서(둘째 장: 신청내역·수행계획·사업비·수입금)
+  f1_1b: (pg) => {
+    const out = {}, h4 = findLabel(pg, /^4\.일정별/), h5 = findLabel(pg, /^5\.사업비/), h6 = findLabel(pg, /^6\.보조사업/);
+    const anchors = [[/^지출비목$|^보조세목$/, 60], [/^사용방법$/, 492], [/^일정$/, 82], [/^세부사업내용$/, 237]].map(([re, x]) => { const L = findLabel(pg, re); return L ? [x, L.x0] : null; }).filter(Boolean);
+    const X = fitX(anchors);
+    if (h4 && h5) {
+      const hd = findLabel(pg, /^세부사업내용$/, {yMin: h4.y1}); const y0 = hd ? hd.line.y1 + 12 : h4.y1 + 30;
+      const rows = rowsTable(pg, X, [52, 134, 412, 488, 542], y0, h5.y0 - 1, 1);
+      const sch = rows.filter(r => r.join('') && !/일시,장소,인원/.test(r[1])).map(r => ({when: r[0], content: unbullet(r[1]), budget: chunToWon(r[2]), people: toNum(r[3])})).filter(r => r.when || r.content);
+      if (sch.length) out.schedule = sch;
+    }
+    if (h5) {
+      const tot = pg.lines.find(l => l.y0 > h5.y1 && /^계/.test(l.n));
+      const y0 = tot ? tot.y1 + 1 : h5.y1 + 60, y1 = h6 ? h6.y0 - 1 : 800;
+      const rows = rowsTable(pg, X, [52, 116, 217, 276, 335, 385, 436, 488, 542], y0, y1, 0);
+      const bud = rows.filter(r => r[0] || r[1]).map(r => ({item: r[0].replace(/\n/g, ''), calc: r[1], subsidy: chunToWon(r[3]), self: chunToWon(r[5]), other: chunToWon(r[6]), method: r[7].replace(/\n/g, '')}));
+      if (bud.length) out.budget = bud;
+    }
+    if (h6) {
+      const tot = pg.lines.find(l => l.y0 > h6.y1 && /^계/.test(l.n));
+      const rows = tot ? rowsTable(pg, X, [52, 169, 252, 371, 488, 542], tot.y1 + 1, 790, 0) : [];
+      const inc = rows.filter(r => r[0] && !/해당없음/.test(r.join(''))).map(r => ({name: r[0], amount: chunToWon(r[1]), content: r[2], use: r[3], note: r[4]}));
+      if (inc.length) out.income = inc;
+    }
+    return {fields: out};
+  },
+  // 서식1-3 보조금 외 경비 부담내역
+  f1_3: (pg) => {
+    const hd = findLabel(pg, /^부담자성명$/); if (!hd) return {fields: {}};
+    const X = fitX([[171, hd.x0]]), etc = findLabel(pg, /^기타$/, {yMin: hd.y1 + 30});
+    const tot = pg.lines.find(l => l.y0 > hd.y1 && /^계/.test(l.n));
+    const rows = rowsTable(pg, X, [53, 151, 249, 347, 445, 543], (tot ? tot.y1 : hd.y1 + 20) + 1, 790, 1);
+    const list = rows.filter(r => nz(r[1]).replace(/○/g, ''));
+    const ys = []; // 행의 y 위치로 자부담/기타 구분
+    pg.lines.filter(l => l.y0 > (tot ? tot.y1 : hd.y1)).forEach(l => ys.push(l));
+    const burden = list.map(r => ({type: '자부담', who: r[1].replace(/○/g, '').trim(), amount: chunToWon(r[2]), how: r[3], note: r[4]}));
+    if (etc) { const ln = pg.lines.filter(l => l.y0 > (tot ? tot.y1 : hd.y1)); let k = 0; ln.forEach(l => { const isRow = burden[k] && l.t.includes(burden[k].who); if (isRow) { if (l.y0 >= etc.y0 - 14) burden[k].type = '기타'; k++; } }); }
+    return {fields: burden.length ? {burden} : {}};
+  },
+};
+function classify(pg) {
+  const head = pg.lines.slice(0, 14).map(l => l.n).join('|'), all = pg.lines.map(l => l.n).join('|');
+  if (/지방보조금지원신청서/.test(head)) return 'f1';
+  if (/사업계획서/.test(head) && !/최종/.test(head) && /신청단체/.test(all)) return 'f1_1a';
+  if (/일정별세부수행계획/.test(all) && /사업비집행계획/.test(all) && /보조금신청내역/.test(all)) return 'f1_1b';
+  if (/보조금외경비부담내역/.test(head)) return 'f1_3';
+  return null;
+}
+/* PDF 한 개 → {source, org:{}, project:{}, notes:[]} */
+async function parseApplicationPdf(file) {
+  const pages = await readPdf(file);
+  const pay = await findPayload(pages);
+  if (pay && pay.org && pay.project) return {source: 'data', org: pay.org, project: pay.project, notes: ['이 프로그램에서 만든 PDF라서 입력 내용을 그대로 불러왔습니다.']};
+  const textChars = pages.reduce((s, p) => s + p.lines.reduce((t, l) => t + l.n.length, 0), 0);
+  if (textChars < 30) return {source: 'none', org: {}, project: {}, notes: ['PDF에서 글자를 찾지 못했습니다. 스캔하거나 그림으로 된 PDF는 불러올 수 없습니다.']};
+  const org = {}, project = {}, notes = [], used = [];
+  for (const pg of pages) {
+    const kind = classify(pg); if (!kind) continue;
+    const r = PARSERS[kind](pg); used.push(kind);
+    Object.entries(r.fields).forEach(([k, v]) => {
+      if (v === '' || v == null) return;
+      if (k.startsWith('org.')) { if (isBlank(getP(org, k.slice(4)))) setP(org, k.slice(4), v); }
+      else if (isBlank(project[k]) || (Array.isArray(v) && !(project[k] || []).length)) project[k] = v;
+    });
+    if (r.totals) project._totals = r.totals;
+  }
+  if (!used.length) notes.push('지원신청서·사업계획서·경비부담내역 서식을 찾지 못했습니다. 원본 서식을 고쳐서 만든 경우 일부만 읽힐 수 있습니다.');
+  else notes.push(`읽은 서식: ${[...new Set(used.map(u => ({f1: '서식1 지원신청서', f1_1a: '서식1-1 사업계획서', f1_1b: '서식1-1 사업계획서(사업비 등)', f1_3: '서식1-3 경비부담내역'}[u])))].join(', ')}`);
+  if (project._totals && !project.budget) {
+    const t = project._totals; if (t.total) project.budget = [{item: '사업비', calc: '(신청서 총액 기준 — 비목별 내역 확인 필요)', subsidy: t.sub || '', self: t.total && t.sub ? t.total - t.sub : '', other: '', method: ''}];
+    notes.push('사업비 집행계획 표를 찾지 못해 신청서의 총액만 한 줄로 넣었습니다.');
+  }
+  delete project._totals;
+  return {source: 'text', org, project, notes};
+}
+/* ---- 확인 화면 ---- */
+const IMPORT_FIELDS = {
+  org: [['name', '단체명'], ['founded', '설립일'], ['location', '소재지'], ['phone', '단체 전화'], ['bizNo', '고유번호'], ['membersTotal', '회원수'], ['membersRegular', '정회원'], ['membersAssoc', '준회원'], ['membersOther', '기타 회원'],
+    ['regDept', '등록부처'], ['regDate', '등록일'], ['regNo', '등록번호'], ['rep.name', '대표자 성명'], ['rep.phone', '대표자 휴대전화'], ['rep.address', '대표자 주소'], ['mgr.name', '사업담당자 성명'], ['mgr.position', '사업담당자 직위'],
+    ['mgr.phone', '사업담당자 휴대전화'], ['mgr.email', '사업담당자 이메일'], ['officers.chair', '회장'], ['officers.vice', '부회장'], ['officers.secretary', '총무'], ['mainBiz', '주된 사업'], ['assets', '자산액(원)'], ['debts', '부채액(원)'],
+    ['bank.name', '금융기관'], ['bank.account', '계좌번호'], ['bank.holder', '예금주']],
+  project: [['name', '신청사업명'], ['budgetName', '예산서상 세부사업명'], ['dept', '(시)소관부서'], ['start', '사업 시작일'], ['end', '사업 종료일'], ['place', '사업장소'], ['purpose', '사업목적'], ['content', '사업내용'], ['effect', '사업효과'], ['beneficiary', '수혜대상'], ['applyDate', '신청일']],
+  tables: [['budget', '사업비 집행계획', r => `${r.item || '-'} 보조 ${won(r.subsidy)} / 자부담 ${won(N(r.self) + N(r.other))}`], ['schedule', '일정별 수행계획', r => `${r.when || ''} ${first(r.content || '')}`], ['burden', '경비 부담내역', r => `${r.type} ${r.who} ${won(r.amount)}`],
+    ['income', '수입금', r => `${r.name} ${won(r.amount)}`], ['activities', '공익활동 실적', r => r.name]],
+};
+let IMPORT = null;
+function pickImport(target) { // target: 'new' | projectId
+  const inp = document.createElement('input'); inp.type = 'file'; inp.accept = 'application/pdf,.pdf';
+  inp.onchange = async () => {
+    const f = inp.files[0]; if (!f) return;
+    gate(`<h2>PDF 읽는 중…</h2><p class="muted">${esc(f.name)}</p>`);
+    try { IMPORT = {target, file: f.name, res: await parseApplicationPdf(f)}; showImport(); }
+    catch (e) { gate(`<h2>PDF를 읽지 못했습니다</h2><p>${esc(e.message || String(e))}</p><p class="muted">PDF 읽기 도구를 인터넷에서 불러오므로 인터넷 연결이 필요합니다.</p><div class="row"><button onclick="gateHide()">닫기</button></div>`); }
+  };
+  inp.click();
+}
+function showImport() {
+  const {target, res} = IMPORT, p = target === 'new' ? null : findP(target);
+  const nameMatch = res.org.name && DB.orgs.find(o => nz(o.name) === nz(res.org.name));
+  const curOrg = p ? orgOf(p) : nameMatch || null, curP = p;
+  IMPORT.curOrg = curOrg;
+  const show = v => Array.isArray(v) ? '' : (v ?? '');
+  const row = (grp, k, label, nv, cv) => {
+    const differ = String(nv ?? '') !== String(cv ?? ''), has = !isBlank(nv);
+    return `<tr class="${has && differ ? 'imp-diff' : ''}"><td><input type="checkbox" data-imp="${grp}:${k}" ${has && differ ? 'checked' : ''} ${has ? '' : 'disabled'}></td><td>${label}</td>
+      <td>${has ? (String(nv).length > 40 || String(nv).includes('\n') ? `<textarea data-impv="${grp}:${k}" rows="2">${esc(nv)}</textarea>` : `<input data-impv="${grp}:${k}" value="${esc(nv)}">`) : '<span class="muted">읽지 못함</span>'}</td>
+      <td class="muted" style="white-space:pre-wrap">${esc(show(cv)).slice(0, 120)}</td></tr>`;
+  };
+  const orgRows = IMPORT_FIELDS.org.map(([k, l]) => row('org', k, l, getP(res.org, k), curOrg ? getP(curOrg, k) : '')).join('');
+  const projRows = IMPORT_FIELDS.project.map(([k, l]) => row('project', k, l, res.project[k], curP ? curP[k] : '')).join('');
+  const tblRows = IMPORT_FIELDS.tables.map(([k, l, fmt]) => {
+    const src = k === 'activities' ? res.org.activities : res.project[k]; const cur = k === 'activities' ? (curOrg?.activities || []) : (curP?.[k] || []);
+    if (!src || !src.length) return `<tr><td><input type="checkbox" disabled></td><td>${l}</td><td><span class="muted">읽지 못함</span></td><td class="muted">${cur.length}행</td></tr>`;
+    return `<tr class="imp-diff"><td><input type="checkbox" data-imp="${k === 'activities' ? 'org' : 'project'}:${k}" checked></td><td>${l}<div class="muted" style="font-size:11px">통째로 바꿈</div></td><td style="font-size:12px">${src.map(r => esc(fmt(r))).join('<br>')}</td><td class="muted">현재 ${cur.length}행</td></tr>`;
+  }).join('');
+  const orgNote = p ? `이 사업의 단체(<b>${esc(curOrg.name)}</b>) 정보에 반영합니다.` : nameMatch ? `같은 이름의 단체 <b>${esc(nameMatch.name)}</b>가 이미 있어 그 단체 정보에 반영하고, 새 보조사업을 만듭니다.` : '새 단체로 등록하고 새 보조사업을 만듭니다.';
+  gate(`<div class="imp"><h2>신청서 PDF 불러오기 — 확인</h2><p class="muted" style="margin:0">${esc(IMPORT.file)}</p>
+    <ul class="checks" style="margin:10px 0">${res.notes.map(n => `<li class="${res.source === 'data' ? 'ok' : res.source === 'none' ? 'bad' : 'warn'}"><b>${res.source === 'data' ? '✓' : '!'}</b><span>${esc(n)}</span></li>`).join('')}
+      ${res.source === 'text' ? '<li class="warn"><b>!</b><span>PDF 글자를 위치로 추정해 읽었습니다. 아래 값을 원본과 비교해 확인·수정한 뒤 반영하세요.</span></li>' : ''}</ul>
+    ${res.source === 'none' ? '<div class="row"><button onclick="gateHide()">닫기</button></div>' : `
+    <p>${orgNote} 체크한 항목만 반영됩니다. 읽은 값은 여기서 바로 고칠 수 있습니다.</p>
+    <div class="imp-scroll"><table class="t"><thead><tr><th style="width:28px"></th><th style="width:130px">항목</th><th>PDF에서 읽은 값</th><th style="width:30%">현재 값</th></tr></thead>
+      <tbody><tr><th colspan="4">단체 정보</th></tr>${orgRows}<tr><th colspan="4">사업 정보</th></tr>${projRows}<tr><th colspan="4">표</th></tr>${tblRows}</tbody></table></div>
+    <div class="row" style="margin-top:12px"><button onclick="document.querySelectorAll('[data-imp]:not(:disabled)').forEach(c=>c.checked=true)">모두 선택</button><button onclick="document.querySelectorAll('[data-imp]').forEach(c=>c.checked=false)">모두 해제</button><span class="sp"></span><button onclick="gateHide()">취소</button><button class="pri" onclick="applyImport()">체크한 항목 반영</button></div>`}</div>`);
+  document.querySelector('#gate .gate-box').classList.add('wide');
+}
+function applyImport() {
+  const {target, res} = IMPORT, picked = [...document.querySelectorAll('#gate [data-imp]:checked')].map(c => c.dataset.imp);
+  if (!picked.length) { alert('반영할 항목을 하나 이상 체크하세요.'); return; }
+  const val = (grp, k) => { const el = document.querySelector(`#gate [data-impv="${grp}:${k}"]`); if (!el) return clone(grp === 'org' ? getP(res.org, k) : res.project[k]); const v = el.value; return /membersTotal|membersRegular|membersAssoc|membersOther|assets|debts/.test(k) ? (v === '' ? '' : toNum(v)) : v; };
+  let o = IMPORT.curOrg, newOrg = false, p = target === 'new' ? null : findP(target), newP = false;
+  if (!o) { o = fillDefaults({id: uid(), createdAt: today()}, ORG_TPL); newOrg = true; }
+  if (!p) {
+    const s = DB.settings;
+    p = fillDefaults({id: uid(), orgId: o.id, createdAt: today(), dept: s.dept, team: s.team, staff: s.staff, staffPhone: s.staffPhone}, PROJECT_TPL);
+    p.decision.writer = s.staff; p.decision.reviewer = s.reviewer; p.decision.confirmer = s.confirmer; p.decision.account.dept = s.dept;
+    p.grant.chiefPos = '대표'; newP = true;
+  }
+  picked.forEach(key => {
+    const [grp, k] = key.split(':');
+    if (grp === 'org') setP(o, k, val('org', k)); else p[k] = val('project', k);
+    if (!newOrg && grp === 'org') persist('org', o, k);
+    if (!newP && grp === 'project') persist('project', p, k);
+  });
+  if (newP) { p.grant.chiefName = o.rep.name; p.grant.workPos = o.mgr.position; p.grant.workName = o.mgr.name; }
+  if (newOrg) { DB.orgs.push(o); createDoc('org', o); }
+  if (newP) { DB.projects.push(p); createDoc('project', p); }
+  if (!SYNC.on) save();
+  gateHide(); IMPORT = null;
+  location.hash = `#/p/${p.id}/apply`; rerender();
+  setTimeout(() => alert(`${picked.length}개 항목을 반영했습니다.${newOrg ? ' 새 단체를 등록했습니다.' : ''}${newP ? ' 새 보조사업을 만들었습니다.' : ''} 신청 화면에서 내용을 확인하세요.`), 50);
 }
 
 /* ================= Firebase 실시간 공유 =================
