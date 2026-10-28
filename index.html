@@ -162,6 +162,8 @@ textarea.pf.box{background:rgba(120,190,255,.18);outline:1px dashed #6aa6e8;resi
 .gate-box.wide{max-width:980px;max-height:92vh;display:flex;flex-direction:column}
 .imp-scroll{overflow:auto;flex:1;min-height:0;border:1px solid var(--line);border-radius:8px}
 .gate-box.wide .imp{display:flex;flex-direction:column;min-height:0;max-height:calc(92vh - 52px)}
+.autofill-flash{background:#e6f4ea!important;transition:background .3s}
+.ocrbar{height:6px;background:#eef1f5;border-radius:3px;overflow:hidden}.ocrbar i{display:block;height:100%;width:0;background:var(--pri);transition:width .3s}
 .imp-scroll th[colspan]{background:#eef3fb;color:var(--pri);font-size:13px}
 .imp-scroll td{vertical-align:top}
 .imp-scroll td input:not([type=checkbox]),.imp-scroll td textarea{width:100%}
@@ -517,9 +519,47 @@ document.addEventListener('input', e => {
   else if (el.dataset.n !== undefined) v = el.value === '' ? '' : Number(el.value);
   else v = el.value;
   setP(root, el.dataset.b, v);
-  persist(kindOf(el), root, el.dataset.b); refresh();
+  persist(kindOf(el), root, el.dataset.b);
+  const cm = el.dataset.b.match(/^budget\.(\d+)\.(adj_)?calc$/);
+  if (cm && kindOf(el) === 'project') autoAmount(root, +cm[1], !!cm[2]);
+  refresh();
   if (el.dataset.rerender !== undefined) rerender();
 });
+/* 산출내역 → 금액 자동 계산
+   "200,000원×1명×25회", "5,000원 * 70명", "강사 1명*25회*150,000원 = 3,750,000원", 여러 줄·'+'는 합산, '%'는 비율, '만원'은 ×10,000 */
+function calcAmount(s) {
+  let total = 0, found = false;
+  for (const raw of String(s || '').split('\n')) {
+    const left = raw.split('=')[0];
+    for (const part of left.split('+')) {
+      const segs = part.split(/[×xX*✕]/);
+      if (segs.length < 2 && !/\d[\d,.]*\s*(만\s*)?원/.test(part)) continue;
+      let prod = 1, ok = true;
+      segs.forEach((seg, i) => {
+        const nums = [...seg.matchAll(/(\d[\d,]*(?:\.\d+)?)\s*(만|천)?\s*(%|원|명|회|개|일|월|개월|식|부|매|인|건|시간|권|ea|EA|세트|박)?/g)];
+        if (!nums.length) { ok = false; return; }
+        const m = i === 0 ? nums[nums.length - 1] : nums[0]; // 첫 칸은 마지막 숫자(앞 설명의 숫자 무시), 나머지는 첫 숫자
+        let v = parseFloat(m[1].replace(/,/g, ''));
+        if (m[2] === '만') v *= 10000; else if (m[2] === '천' && m[3] === '원') v *= 1000;
+        if (m[3] === '%') v /= 100;
+        prod *= v;
+      });
+      if (ok && isFinite(prod)) { total += prod; found = true; }
+    }
+  }
+  return found ? Math.round(total) : null;
+}
+function autoAmount(p, i, adj) {
+  const r = p.budget[i], amt = calcAmount(adj ? r.adj_calc : r.calc); if (amt == null) return;
+  const ks = ['subsidy', 'self', 'other'], cur = k => adj ? (isBlank(r['adj_' + k]) ? N(r[k]) : N(r['adj_' + k])) : N(r[k]);
+  const nz = ks.filter(k => cur(k)), src = ks.filter(k => N(r[k]));
+  let target = nz.length === 1 ? nz[0] : !nz.length ? (adj && src.length === 1 ? src[0] : 'subsidy') : null;
+  if (!target) return; // 여러 재원에 나눠 적은 행은 그대로 두고 '산출액' 칸에 차이만 표시
+  const key = (adj ? 'adj_' : '') + target;
+  if (N(r[key]) === amt && !isBlank(r[key])) return;
+  r[key] = amt; persist('project', p, `budget.${i}.${key}`);
+  const inp = document.querySelector(`[data-b="budget.${i}.${key}"]`); if (inp && inp !== document.activeElement) { inp.value = amt; inp.classList.add('autofill-flash'); setTimeout(() => inp.classList.remove('autofill-flash'), 900); }
+}
 document.addEventListener('change', e => { if (e.target.dataset && e.target.dataset.rerender !== undefined) rerender(); });
 document.addEventListener('click', e => {
   const b = e.target.closest('[data-act]'); if (!b) return;
@@ -544,6 +584,12 @@ function refresh() {
     const root = rootOf(el); if (!root) return;
     const spec = el.dataset.calc;
     if (spec.startsWith('sum:')) { const [, lp, k] = spec.split(':'); el.textContent = won(sum(getP(root, lp), k)); }
+    else if (spec.startsWith('rowTot:')) { const r = root.budget[+spec.slice(7)]; el.textContent = r ? won(N(r.subsidy) + N(r.self) + N(r.other)) : ''; }
+    else if (spec.startsWith('calcAmt:') || spec.startsWith('adjAmt:')) {
+      const adj = spec.startsWith('adj'), r = root.budget[+spec.split(':')[1]]; if (!r) return;
+      const a = calcAmount(adj ? r.adj_calc : r.calc), t = adj ? dv(r, 'subsidy') + dv(r, 'self') + dv(r, 'other') : N(r.subsidy) + N(r.self) + N(r.other);
+      el.textContent = a == null ? '-' : won(a); el.style.color = a != null && a !== t ? 'var(--bad)' : ''; el.title = a != null && a !== t ? `금액 합계(${won(t)})와 다릅니다` : '';
+    }
     else el.innerHTML = CALC[spec](root);
   });
   const s = $('#summary'); if (s && CUR.project) s.innerHTML = summary(CUR.project, s.dataset.step);
@@ -791,13 +837,14 @@ function stepApply(p, o) {
   <div class="card"><h2>사업비 집행계획 <span class="tag">서식1-1 ⑤ · 단위: 원</span></h2>
     ${tbl(p, 'budget', [
       {k: 'item', h: '지출비목', w: '13%', list: 'itemList', ph: '강사비'},
-      {k: 'calc', h: '산출내역', ph: '단가×인원×횟수 = 금액', w: '28%'},
+      {k: 'calc', h: '산출내역', ph: '200,000원×1명×25회', w: '26%'},
+      {k: 'amt', h: '산출액', n: 1, ro: (r, i) => `<span data-calc="calcAmt:${i}"></span>`, w: '9%'},
       {k: 'subsidy', h: '보조금(A)', n: 1}, {k: 'self', h: '자부담', n: 1}, {k: 'other', h: '기타(기부금 등)', n: 1},
-      {k: 'tot', h: '총사업비', n: 1, ro: r => won(N(r.subsidy) + N(r.self) + N(r.other))},
-      {k: 'method', h: '사용방법', w: '10%'},
-    ], {foot: `<tr><td></td><td colspan="2">계</td><td class="num" data-calc="sum:budget:subsidy"></td><td class="num" data-calc="sum:budget:self"></td><td class="num" data-calc="sum:budget:other"></td><td class="num" data-calc="reqTotal"></td><td colspan="2"></td></tr>`})}
+      {k: 'tot', h: '총사업비', n: 1, ro: (r, i) => `<span data-calc="rowTot:${i}"></span>`},
+      {k: 'method', h: '사용방법', w: '9%'},
+    ], {foot: `<tr><td></td><td colspan="3">계</td><td class="num" data-calc="sum:budget:subsidy"></td><td class="num" data-calc="sum:budget:self"></td><td class="num" data-calc="sum:budget:other"></td><td class="num" data-calc="reqTotal"></td><td colspan="2"></td></tr>`})}
     <datalist id="itemList">${['강사비', '보조강사비', '재료비', '홍보비', '인쇄비', '임차료', '운영비', '여비', '자문료', '행사운영비', '기념품', '식비', '보험료', '용역비'].map(x => `<option>${x}</option>`).join('')}</datalist>
-    <p class="hint">산출기초는 <b>단가(원) × 인원(명) × 개소 × 회수(회) × 일수 × 비율(%)</b> 순서로 작성합니다. 금액 입력 후 새로고침 없이 합계가 반영됩니다(행 합계는 다른 칸으로 이동 시 갱신).</p>
+    <p class="hint">산출내역에 <b>단가 × 인원 × 횟수</b>처럼 곱셈식(×, x, * 모두 가능)을 적으면 <b>금액이 자동 계산</b>되어 보조금 칸(이미 자부담·기타 중 한 칸에만 금액이 있으면 그 칸)에 들어갑니다. 여러 줄이나 '+'는 합산하고, '%'는 비율, '20만원'은 200,000원으로 계산합니다. 여러 재원에 나눠 적은 행은 금액을 바꾸지 않고 산출액과 다르면 빨간색으로 표시합니다.<br>산출기초는 <b>단가(원) × 인원(명) × 개소 × 회수(회) × 일수 × 비율(%)</b> 순서로 작성합니다.</p>
   </div>
   <div class="card"><h2>보조금 외 경비 부담내역 <span class="tag">서식1-3 · 단위: 원</span></h2>
     ${tbl(p, 'burden', [{k: 'type', h: '구분', opts: ['자부담', '기타'], w: '110px'}, {k: 'who', h: '부담자 성명'}, {k: 'amount', h: '부담금액', n: 1}, {k: 'how', h: '부담방법', ph: '회비, 기부금 등'}, {k: 'note', h: '비고'}],
@@ -820,7 +867,7 @@ function stepDecide(p, o) {
       <td><input type="number" data-n step="any" data-b="budget.${i}.adj_subsidy" value="${esc(r.adj_subsidy ?? '')}" placeholder="${won(r.subsidy)}"></td>
       <td><input type="number" data-n step="any" data-b="budget.${i}.adj_self" value="${esc(r.adj_self ?? '')}" placeholder="${won(r.self)}"></td>
       <td><input type="number" data-n step="any" data-b="budget.${i}.adj_other" value="${esc(r.adj_other ?? '')}" placeholder="${won(r.other)}"></td>
-      <td><input data-b="budget.${i}.adj_calc" value="${esc(r.adj_calc ?? '')}" placeholder="변경 시 입력"></td>
+      <td><input data-b="budget.${i}.adj_calc" value="${esc(r.adj_calc ?? '')}" placeholder="변경 시 입력 (곱셈식 → 금액 자동)"><div class="hint" style="margin:2px 0 0">산출액 <span data-calc="adjAmt:${i}"></span></div></td>
       <td><input data-b="budget.${i}.adj_reason" value="${esc(r.adj_reason ?? '')}" placeholder="조정 없음"></td></tr>`).join('');
   return `
   <div class="docbar"><b>사전 심사</b>${docBtn('f2', '서식2 예산편성 심사')}${docBtn('f3', '서식3 공모 선정심사')}${docBtn('f4', '서식4 조례안 심사')}${docBtn('sel', '사업자 선정 기안문')}</div>
@@ -2226,16 +2273,151 @@ async function readPdf(file) {
       return {s: it.str, x0: e * k, x1: (e + (it.width || 0)) * k, y1: f * k, y0: (f - h) * k};
     });
     items.forEach(it => { if (it.x1 <= it.x0) it.x1 = it.x0 + it.s.length * (it.y1 - it.y0) * 0.9; });
-    items.sort((a, b) => a.y1 - b.y1 || a.x0 - b.x0);
-    const lines = [];
-    for (const it of items) {
-      const L = lines.find(l => Math.abs(l.y1 - it.y1) < 2.5);
-      if (L) { L.items.push(it); L.y0 = Math.min(L.y0, it.y0); } else lines.push({y0: it.y0, y1: it.y1, items: [it]});
-    }
-    lines.forEach(l => { l.items.sort((a, b) => a.x0 - b.x0); l.t = l.items.map(i => i.s).join(''); l.n = l.t.replace(/\s+/g, ''); });
-    pages.push({lines, raw: items});
+    pages.push({...buildLines(items, 2.5), raw: items});
   }
-  return pages;
+  return {pages, doc};
+}
+function buildLines(items, tol) { // 글자 조각들을 같은 높이끼리 묶어 줄로
+  items.sort((a, b) => a.y1 - b.y1 || a.x0 - b.x0);
+  const lines = [];
+  for (const it of items) {
+    const L = lines.find(l => Math.abs(l.y1 - it.y1) < tol);
+    if (L) { L.items.push(it); L.y0 = Math.min(L.y0, it.y0); } else lines.push({y0: it.y0, y1: it.y1, items: [it]});
+  }
+  lines.forEach(l => { l.items.sort((a, b) => a.x0 - b.x0); l.t = l.items.map(i => i.s).join(''); l.n = l.t.replace(/\s+/g, ''); });
+  return {lines};
+}
+/* 스캔(그림) PDF 읽기 — 서식 모양을 알고 있으므로:
+   1) 쪽을 그림으로 그려 기울기를 바로잡고  2) 인쇄된 항목 이름 몇 개를 찾아 원본 서식과 위치를 맞춘 뒤
+   3) 원본 서식의 칸 위치를 하나씩 잘라 따로 글자 인식(Tesseract, 한국어) → 표가 많은 서식에서도 칸 단위로 정확도가 높음 */
+const TESS = 'https://cdn.jsdelivr.net/npm/tesseract.js@5.1.1/dist/tesseract.min.js';
+const SCAN_FORMS = {
+  f1: {title: /지원신청|원신청서|보조금지원/, anchors: [['단체명', 102, 138], ['소재지', 102, 187], ['신청사업명', 104, 370], ['사업장소', 345, 393], ['E-mail', 405, 310], ['총사업비', 107, 490]],
+    fields: [['org.name', 173, 131, 365, 155], ['org.founded', 173, 155, 365, 180, 'date'], ['org.location', 173, 180, 365, 205], ['org.membersTotal', 173, 205, 365, 226, 'num'],
+      ['org.regDept', 173, 226, 365, 254, 'note'], ['org.regDate', 173, 254, 365, 275, 'date'], ['org.regNo', 173, 275, 365, 298], ['org.rep.name', 173, 298, 365, 319], ['org.rep.phone', 173, 319, 365, 341],
+      ['org.rep.address', 173, 341, 538, 364], ['org.mgr.name', 438, 131, 538, 184], ['org.mgr.position', 438, 184, 538, 236], ['org.mgr.phone', 438, 236, 538, 289], ['org.mgr.email', 438, 289, 538, 341],
+      ['name', 173, 364, 331, 387], ['dept', 403, 364, 538, 387], ['period', 173, 387, 331, 410, 'period'], ['place', 403, 387, 538, 410], ['purpose', 173, 410, 538, 433, 'block'],
+      ['content', 173, 433, 538, 471, 'block'], ['applyDate', 290, 572, 450, 594, 'date']]},
+  f1_1a: {title: /사업계획서|업계획서|신청단체/, anchors: [['단체명', 87, 193], ['사업명', 87, 516], ['사업기간', 87, 587], ['사업장소', 87, 611], ['사업효과', 87, 707], ['정회원', 333, 358]],
+    fields: [['org.name', 162, 191, 545, 210], ['org.mainBiz', 84, 243, 545, 300, 'block'], ['org.officers.chair', 140, 378, 237, 397], ['org.officers.vice', 140, 397, 237, 416], ['org.officers.secretary', 140, 416, 237, 436],
+      ['org.membersTotal', 239, 374, 313, 437, 'num'], ['org.membersRegular', 313, 374, 390, 437, 'num'], ['org.membersAssoc', 390, 374, 466, 437, 'num'], ['org.membersOther', 466, 374, 543, 437, 'num'],
+      ['org.assets', 263, 449, 311, 468, 'chun'], ['org.debts', 419, 449, 474, 468, 'chun'], ['name', 162, 513, 545, 534], ['purpose', 87, 559, 545, 587, 'block'], ['period', 162, 585, 545, 606, 'period'],
+      ['place', 162, 609, 545, 630], ['content', 87, 654, 545, 707, 'block'], ['effect', 87, 726, 545, 789, 'block']]},
+  f1_1b: {title: /사업비집행|일정별|수입될수입금|신청내역/, anchors: [['일정', 82, 300], ['세부사업내용', 237, 300], ['지출비목', 60, 483], ['사용방법', 492, 483], ['사업명', 93, 667], ['활용방법', 407, 667]],
+    tables: [['schedule', [322, 362, 401], [52, 134, 412, 488, 542], ['when', 'content', 'budget:chun', 'people:num']],
+      ['budget', [538, 561, 583, 606], [52, 116, 217, 276, 335, 385, 436, 488, 542], ['item', 'calc', '-', 'subsidy:chun', '-', 'self:chun', 'other:chun', 'method']],
+      ['income', [711, 737, 763], [52, 169, 252, 371, 488, 542], ['name', 'amount:chun', 'content', 'use', 'note']]]},
+  f1_3: {title: /경비부담|부담내역|보조금외/, anchors: [['부담자성명', 171, 145], ['부담금액', 275, 145], ['부담방법', 373, 145], ['비고', 482, 145]],
+    tables: [['burden', [192, 219, 246, 274, 302, 329, 356, 384, 411, 439, 466, 494, 521, 549, 576, 604, 631, 659, 686], [151, 249, 347, 445, 543], ['who', 'amount:chun', 'how', 'note'], {type: '자부담'}],
+      ['burden', [686, 714, 741, 768], [151, 249, 347, 445, 543], ['who', 'amount:chun', 'how', 'note'], {type: '기타'}]]},
+};
+const lev = (a, b) => { const d = Array.from({length: a.length + 1}, (_, i) => [i]); for (let j = 1; j <= b.length; j++) d[0][j] = j; for (let i = 1; i <= a.length; i++) for (let j = 1; j <= b.length; j++) d[i][j] = Math.min(d[i - 1][j] + 1, d[i][j - 1] + 1, d[i - 1][j - 1] + (a[i - 1] === b[j - 1] ? 0 : 1)); return d[a.length][b.length]; };
+const ocrClean = s => (s || '').replace(/[|｜\[\]{}_~`¦]/g, ' ').replace(/[ \t]+/g, ' ').split('\n').map(x => x.trim()).filter(Boolean).join('\n');
+function fit1(pairs) { // y = a·x + b (점이 하나면 이동만)
+  if (pairs.length < 2) return pairs.length ? {a: 1, b: pairs[0][1] - pairs[0][0]} : null;
+  const n = pairs.length, sx = pairs.reduce((s, p) => s + p[0], 0), sy = pairs.reduce((s, p) => s + p[1], 0), sxx = pairs.reduce((s, p) => s + p[0] * p[0], 0), sxy = pairs.reduce((s, p) => s + p[0] * p[1], 0);
+  const den = n * sxx - sx * sx; if (Math.abs(den) < 1e-6) return {a: 1, b: (sy - sx) / n};
+  const a = (n * sxy - sx * sy) / den; return a > 0.8 && a < 1.25 ? {a, b: (sy - a * sx) / n} : {a: 1, b: (sy - sx) / n};
+}
+function rotated(src, rad, w, h) { // src를 -rad 만큼 돌려 w×h 캔버스로
+  const cv = document.createElement('canvas'); cv.width = w; cv.height = h;
+  const cx = cv.getContext('2d'); cx.fillStyle = '#fff'; cx.fillRect(0, 0, w, h);
+  cx.translate(w / 2, h / 2); cx.rotate(-rad); cx.drawImage(src, -w / 2, -h / 2, w, h); cx.setTransform(1, 0, 0, 1, 0, 0);
+  return cv;
+}
+async function ocrForms(doc, onProg) {
+  if (!window.Tesseract) await loadScript(TESS);
+  onProg?.('loading', 0);
+  // 일꾼 3개: 한 줄 칸용 2개 + 여러 줄 칸·쪽 전체용 1개 → 칸들을 동시에 인식
+  const mk = async psm => { const w = await Tesseract.createWorker('kor+eng', 1, {logger: m => { if (/loading|initializ/.test(m.status)) onProg?.('loading', m.progress); }}); await w.setParameters({tessedit_pageseg_mode: psm, preserve_interword_spaces: '1'}); w.busy = 0; return w; };
+  const pool = {line: await Promise.all([mk('7'), mk('7')]), block: [await mk('6')]};
+  const run = async (type, img) => { const ws = pool[type], w = ws.reduce((a, b) => a.busy <= b.busy ? a : b); w.busy++; try { return (await w.recognize(img)).data; } finally { w.busy--; } };
+  const worker = pool.block[0];
+  const res = {org: {}, project: {}, used: [], weak: 0};
+  try {
+    const n = Math.min(doc.numPages, 10);
+    for (let i = 1; i <= n; i++) {
+      onProg?.(`${i}/${n}쪽 — 쪽 모양 확인`, (i - 1) / n);
+      const pg = await doc.getPage(i), v1 = pg.getViewport({scale: 1}), vp = pg.getViewport({scale: 2200 / v1.width});
+      const src = document.createElement('canvas'); src.width = Math.round(vp.width); src.height = Math.round(vp.height);
+      await pg.render({canvasContext: src.getContext('2d'), viewport: vp, intent: 'print'}).promise; // print: 화면 갱신을 기다리지 않음(다른 탭으로 가도 계속 진행)
+      // 1) 작은 그림으로 기울기 찾기 → 바로 세운 뒤 전체 글자 위치(항목 이름 찾기용)
+      const sw = 1300, sh = Math.round(src.height * sw / src.width), small = rotated(src, 0, sw, sh);
+      await worker.setParameters({tessedit_pageseg_mode: '11'});
+      let {data} = await worker.recognize(small, {rotateAuto: true});
+      const rad = data.rotateRadians || 0;
+      const cv = rotated(src, rad, src.width, src.height);
+      if (Math.abs(rad) > 0.002) ({data} = await worker.recognize(rotated(src, rad, sw, sh)));
+      await worker.setParameters({tessedit_pageseg_mode: '6'});
+      const ks = sw / 595, k = cv.width / 595, words = (data.words || []).map(w => ({t: nz(w.text), x0: w.bbox.x0 / ks, y0: w.bbox.y0 / ks, x1: w.bbox.x1 / ks, y1: w.bbox.y1 / ks})).filter(w => w.t);
+      const all = words.map(w => w.t).join('');
+      const kind = Object.keys(SCAN_FORMS).find(f => SCAN_FORMS[f].title.test(all.slice(0, 400)) || SCAN_FORMS[f].title.test(all));
+      if (!kind || res.used.includes(kind)) continue;
+      const F = SCAN_FORMS[kind];
+      // 2) 항목 이름 찾기(연속된 글자 조각을 이어 붙여 비슷한 글자열 찾기) → 원본 서식 좌표와 맞춤
+      // 같은 낱말이 한 쪽에 여러 번 나올 수 있으므로(예: 위쪽 '단체명'과 서명란 '단체명') 후보를 모두 모은 뒤,
+      // 가장 많은 항목 이름이 동의하는 이동량을 고르고 그 항목들로만 맞춤
+      const cands = F.anchors.map(([lab, ax, ay]) => {
+        const out = [];
+        for (let a = 0; a < words.length; a++) { let acc = ''; for (let b = a; b < Math.min(words.length, a + 6); b++) { if (b > a && Math.abs(words[b].y0 - words[a].y0) > 6) break; acc += words[b].t; if (lev(acc, lab) <= Math.floor(lab.length / 4)) { out.push({ax, ay, x: words[a].x0, y: words[a].y0}); break; } } }
+        return out;
+      });
+      let best = {votes: 0};
+      cands.flat().forEach(c => {
+        const dx = c.x - c.ax, dy = c.y - c.ay;
+        const inl = cands.map(list => list.find(o => Math.abs(o.x - o.ax - dx) < 14 && Math.abs(o.y - o.ay - dy) < 10)).filter(Boolean);
+        if (inl.length > best.votes) best = {votes: inl.length, inl};
+      });
+      const inl = best.inl || [];
+      const fx = fit1(inl.map(o => [o.ax, o.x])) || {a: 1, b: 0}, fy = fit1(inl.map(o => [o.ay, o.y])) || {a: 1, b: 0};
+      if (inl.length < 2) res.weak++;
+      const T = (x, y) => [(fx.a * x + fx.b) * k, (fy.a * y + fy.b) * k];
+      // 3) 칸별 글자 인식
+      const readBox = async (x0, y0, x1, y1, block) => {
+        const [a, b] = T(x0 + 0.5, y0 + 2), [c, d] = T(x1 - 2, y1 - 2), w = Math.max(4, c - a), h = Math.max(4, d - b);
+        const crop = document.createElement('canvas'); crop.width = Math.round(w * 2); crop.height = Math.round(h * 2);
+        const g = crop.getContext('2d'); g.fillStyle = '#fff'; g.fillRect(0, 0, crop.width, crop.height); g.drawImage(cv, a, b, w, h, 0, 0, crop.width, crop.height);
+        const px2 = g.getImageData(0, 0, crop.width, crop.height).data; let dark = 0;
+        for (let q = 0; q < px2.length; q += 16) if ((px2[q] * 3 + px2[q + 1] * 6 + px2[q + 2]) / 10 < 120) dark++;
+        if (dark / (px2.length / 16) < 0.012) return ''; // 빈칸(잉크가 거의 없음)
+        const r = await run(block ? 'block' : 'line', crop);
+        const t = ocrClean(r.text), good = (t.match(/[가-힣0-9]/g) || []).length;
+        if (r.confidence < 45 || good < Math.max(1, t.replace(/\s/g, '').length * 0.5)) return ''; // 믿기 어려운 결과(잡티·선 등)는 버림
+        return t;
+      };
+      const set = (k2, v) => { if (v === '' || v == null) return; if (k2.startsWith('org.')) setP(res.org, k2.slice(4), v); else res.project[k2] = v; };
+      const total = (F.fields || []).length + (F.tables || []).reduce((s, t) => s + (t[1].length - 1) * t[2].length, 0); let done = 0;
+      const tick = () => onProg?.(`${i}/${n}쪽 — 칸별 글자 인식 (${++done}/${total})`, ((i - 1) + done / total) / n);
+      const read = (...a) => readBox(...a).then(t => { tick(); return t; });
+      // 칸들을 한꺼번에 맡기고(일꾼 3개가 나눠 처리) 결과를 모음
+      const fieldTexts = await Promise.all((F.fields || []).map(([, x0, y0, x1, y1, how]) => read(x0, y0, x1, y1, how === 'block')));
+      (F.fields || []).forEach(([key, , , , , how], fi) => {
+        const t = fieldTexts[fi]; if (!t) return;
+        if (how === 'date') set(key, toDate(t)); else if (how === 'period') { const p = toPeriod(t); set('start', p.start); set('end', p.end); }
+        else if (how === 'num') set(key, toNum(t)); else if (how === 'chun') set(key, chunToWon(t));
+        else if (how === 'note') set(key, t.replace(/※[^\n]*/g, '').replace(/.*해당없음.*기재.*/g, '').trim());
+        else if (how === 'block') set(key, unbullet(t)); else set(key, t.replace(/\n/g, ' '));
+      });
+      for (const [tk, ys, xs, cols, extra] of (F.tables || [])) {
+        const jobs = [];
+        for (let r = 0; r < ys.length - 1; r++) cols.forEach((col, c) => { const [ck] = col.split(':'); jobs.push(ck === '-' ? Promise.resolve(tick()).then(() => '') : read(xs[c], ys[r], xs[c + 1], ys[r + 1], ck === 'content' || ck === 'calc')); });
+        const texts = await Promise.all(jobs), rows = [];
+        for (let r = 0; r < ys.length - 1; r++) {
+          const row = {...(extra || {})}; let any = false;
+          cols.forEach((col, c) => {
+            const [ck, typ] = col.split(':'); if (ck === '-') return;
+            const t = texts[r * cols.length + c]; if (!t) { row[ck] = ''; return; }
+            any = true; row[ck] = typ === 'chun' ? chunToWon(t) : typ === 'num' ? toNum(t) : t.replace(/○/g, '').trim();
+          });
+          if (any) rows.push(row);
+        }
+        const clean = rows.filter(r => !/일시,?장소|해당없음/.test(Object.values(r).join('')));
+        if (clean.length) res.project[tk] = [...(res.project[tk] || []), ...clean];
+      }
+      res.used.push(kind);
+    }
+  } finally { await Promise.all([...pool.line, ...pool.block].map(w => w.terminate())); }
+  return res;
 }
 async function findPayload(pages) {
   for (const pg of pages) {
@@ -2409,13 +2591,21 @@ function classify(pg) {
   return null;
 }
 /* PDF 한 개 → {source, org:{}, project:{}, notes:[]} */
-async function parseApplicationPdf(file) {
-  const pages = await readPdf(file);
-  const pay = await findPayload(pages);
+async function parseApplicationPdf(file, onProg, forceOcr) {
+  let {pages, doc} = await readPdf(file), scanned = false;
+  const pay = forceOcr ? null : await findPayload(pages);
   if (pay && pay.org && pay.project) return {source: 'data', org: pay.org, project: pay.project, notes: ['이 프로그램에서 만든 PDF라서 입력 내용을 그대로 불러왔습니다.']};
   const textChars = pages.reduce((s, p) => s + p.lines.reduce((t, l) => t + l.n.length, 0), 0);
-  if (textChars < 30) return {source: 'none', org: {}, project: {}, notes: ['PDF에서 글자를 찾지 못했습니다. 스캔하거나 그림으로 된 PDF는 불러올 수 없습니다.']};
-  const org = {}, project = {}, notes = [], used = [];
+  // 글자가 있어도 서식을 하나도 못 알아보면(글꼴이 깨진 PDF 등) 글자 인식으로 전환
+  const noForm = textChars >= 30 && !pages.some(pg => classify(pg));
+  if (textChars < 30 || forceOcr || noForm) { // 스캔 PDF → 서식 칸별 글자 인식
+    const r = await ocrForms(doc, onProg);
+    const names = {f1: '서식1 지원신청서', f1_1a: '서식1-1 사업계획서', f1_1b: '서식1-1 사업계획서(사업비 등)', f1_3: '서식1-3 경비부담내역'};
+    if (!r.used.length) return {source: 'none', org: {}, project: {}, notes: ['스캔 PDF에서 지원신청서·사업계획서·경비부담내역 서식을 찾지 못했습니다. 더 선명하게(300dpi 이상, 똑바로) 스캔해 보세요.']};
+    return {source: 'ocr', org: r.org, project: r.project, notes: ['스캔 PDF라서 서식 칸마다 글자 인식(OCR)으로 읽었습니다. 글자가 틀리거나 빠질 수 있으니 원본과 꼭 비교하세요.',
+      `읽은 서식: ${r.used.map(u => names[u]).join(', ')}`, ...(r.weak ? ['일부 쪽은 위치 맞춤 기준을 충분히 찾지 못해 칸이 어긋났을 수 있습니다.'] : [])]};
+  }
+  const org = {}, project = {}, notes = scanned ? ['스캔 PDF라서 글자 인식(OCR)으로 읽었습니다. 글자가 틀리거나 빠질 수 있으니 원본과 꼭 비교하세요.'] : [], used = [];
   for (const pg of pages) {
     const kind = classify(pg); if (!kind) continue;
     const r = PARSERS[kind](pg); used.push(kind);
@@ -2433,7 +2623,7 @@ async function parseApplicationPdf(file) {
     notes.push('사업비 집행계획 표를 찾지 못해 신청서의 총액만 한 줄로 넣었습니다.');
   }
   delete project._totals;
-  return {source: 'text', org, project, notes};
+  return {source: scanned ? 'ocr' : 'text', org, project, notes};
 }
 /* ---- 확인 화면 ---- */
 const IMPORT_FIELDS = {
@@ -2448,13 +2638,23 @@ const IMPORT_FIELDS = {
 let IMPORT = null;
 function pickImport(target) { // target: 'new' | projectId
   const inp = document.createElement('input'); inp.type = 'file'; inp.accept = 'application/pdf,.pdf';
-  inp.onchange = async () => {
-    const f = inp.files[0]; if (!f) return;
-    gate(`<h2>PDF 읽는 중…</h2><p class="muted">${esc(f.name)}</p>`);
-    try { IMPORT = {target, file: f.name, res: await parseApplicationPdf(f)}; showImport(); }
-    catch (e) { gate(`<h2>PDF를 읽지 못했습니다</h2><p>${esc(e.message || String(e))}</p><p class="muted">PDF 읽기 도구를 인터넷에서 불러오므로 인터넷 연결이 필요합니다.</p><div class="row"><button onclick="gateHide()">닫기</button></div>`); }
-  };
+  inp.onchange = () => { const f = inp.files[0]; if (f) runImport(target, f, false); };
   inp.click();
+}
+async function runImport(target, f, forceOcr) {
+  gate(`<h2>PDF 읽는 중…</h2><p class="muted">${esc(f.name)}</p><p id="ocrMsg" class="muted"></p><div class="ocrbar"><i id="ocrBar"></i></div>
+    <p class="hint">스캔 PDF는 서식 칸마다 글자를 인식하므로 1쪽에 30초~1분 정도 걸립니다. 이 창을 닫지 말고 기다려 주세요.</p>`);
+  const prog = (msg, p) => {
+    const m = $('#ocrMsg'), b = $('#ocrBar'); if (!m) return;
+    if (msg) m.textContent = /load|initial/.test(msg) ? '글자 인식(OCR) 도구와 한국어 자료를 준비하는 중… (처음 한 번은 1분 정도 걸릴 수 있습니다)' : `글자 인식(OCR): ${msg}`;
+    if (p != null) b.style.width = Math.round(p * 100) + '%';
+  };
+  try {
+    const res = await parseApplicationPdf(f, prog, forceOcr);
+    (res.project.budget || []).forEach(r => { const a = calcAmount(r.calc); if (a != null && !N(r.subsidy) && !N(r.self) && !N(r.other)) r.subsidy = a; }); // 금액을 못 읽은 행은 산출내역으로 계산
+    IMPORT = {target, file: f.name, fileObj: f, res}; showImport();
+  }
+  catch (e) { gate(`<h2>PDF를 읽지 못했습니다</h2><p>${esc(e.message || String(e))}</p><p class="muted">PDF 읽기·글자 인식 도구를 인터넷에서 불러오므로 인터넷 연결이 필요합니다.</p><div class="row"><button onclick="gateHide()">닫기</button></div>`); }
 }
 function showImport() {
   const {target, res} = IMPORT, p = target === 'new' ? null : findP(target);
@@ -2478,12 +2678,15 @@ function showImport() {
   const orgNote = p ? `이 사업의 단체(<b>${esc(curOrg.name)}</b>) 정보에 반영합니다.` : nameMatch ? `같은 이름의 단체 <b>${esc(nameMatch.name)}</b>가 이미 있어 그 단체 정보에 반영하고, 새 보조사업을 만듭니다.` : '새 단체로 등록하고 새 보조사업을 만듭니다.';
   gate(`<div class="imp"><h2>신청서 PDF 불러오기 — 확인</h2><p class="muted" style="margin:0">${esc(IMPORT.file)}</p>
     <ul class="checks" style="margin:10px 0">${res.notes.map(n => `<li class="${res.source === 'data' ? 'ok' : res.source === 'none' ? 'bad' : 'warn'}"><b>${res.source === 'data' ? '✓' : '!'}</b><span>${esc(n)}</span></li>`).join('')}
-      ${res.source === 'text' ? '<li class="warn"><b>!</b><span>PDF 글자를 위치로 추정해 읽었습니다. 아래 값을 원본과 비교해 확인·수정한 뒤 반영하세요.</span></li>' : ''}</ul>
+      ${res.source === 'text' || res.source === 'ocr' ? '<li class="warn"><b>!</b><span>PDF 글자를 위치로 추정해 읽었습니다. 아래 값을 원본과 비교해 확인·수정한 뒤 반영하세요.</span></li>' : ''}</ul>
     ${res.source === 'none' ? '<div class="row"><button onclick="gateHide()">닫기</button></div>' : `
     <p>${orgNote} 체크한 항목만 반영됩니다. 읽은 값은 여기서 바로 고칠 수 있습니다.</p>
     <div class="imp-scroll"><table class="t"><thead><tr><th style="width:28px"></th><th style="width:130px">항목</th><th>PDF에서 읽은 값</th><th style="width:30%">현재 값</th></tr></thead>
       <tbody><tr><th colspan="4">단체 정보</th></tr>${orgRows}<tr><th colspan="4">사업 정보</th></tr>${projRows}<tr><th colspan="4">표</th></tr>${tblRows}</tbody></table></div>
-    <div class="row" style="margin-top:12px"><button onclick="document.querySelectorAll('[data-imp]:not(:disabled)').forEach(c=>c.checked=true)">모두 선택</button><button onclick="document.querySelectorAll('[data-imp]').forEach(c=>c.checked=false)">모두 해제</button><span class="sp"></span><button onclick="gateHide()">취소</button><button class="pri" onclick="applyImport()">체크한 항목 반영</button></div>`}</div>`);
+    <div class="row" style="margin-top:12px"><button onclick="document.querySelectorAll('[data-imp]:not(:disabled)').forEach(c=>c.checked=true)">모두 선택</button><button onclick="document.querySelectorAll('[data-imp]').forEach(c=>c.checked=false)">모두 해제</button>
+      ${res.source === 'ocr' ? '' : `<button onclick="runImport(IMPORT.target, IMPORT.fileObj, true)" title="글자가 깨져 보이거나 빈칸이 많을 때 서식 그림에서 직접 글자를 인식합니다">글자 인식(OCR)으로 다시 읽기</button>`}
+      <span class="sp"></span><button onclick="gateHide()">취소</button><button class="pri" onclick="applyImport()">체크한 항목 반영</button></div>`}
+    ${res.source === 'none' ? `<div class="row" style="margin-top:8px"><button onclick="runImport(IMPORT.target, IMPORT.fileObj, true)">글자 인식(OCR)으로 다시 읽기</button></div>` : ''}</div>`);
   document.querySelector('#gate .gate-box').classList.add('wide');
 }
 function applyImport() {
