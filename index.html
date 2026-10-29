@@ -2349,10 +2349,19 @@ async function ocrForms(doc, onProg) {
       const cv = rotated(src, rad, src.width, src.height);
       if (Math.abs(rad) > 0.002) ({data} = await worker.recognize(rotated(src, rad, sw, sh)));
       await worker.setParameters({tessedit_pageseg_mode: '6'});
-      const ks = sw / 595, k = cv.width / 595, words = (data.words || []).map(w => ({t: nz(w.text), x0: w.bbox.x0 / ks, y0: w.bbox.y0 / ks, x1: w.bbox.x1 / ks, y1: w.bbox.y1 / ks})).filter(w => w.t);
+      const ks = sw / 595, k = cv.width / 595, words = (data.words || []).map(w => ({s: w.text, t: nz(w.text), x0: w.bbox.x0 / ks, y0: w.bbox.y0 / ks, x1: w.bbox.x1 / ks, y1: w.bbox.y1 / ks})).filter(w => w.t);
       const all = words.map(w => w.t).join('');
       const kind = Object.keys(SCAN_FORMS).find(f => SCAN_FORMS[f].title.test(all.slice(0, 400)) || SCAN_FORMS[f].title.test(all));
-      if (!kind || res.used.includes(kind)) continue;
+      const genericOnly = () => { // 모르는 서식: 제목행 표(값은 아래 칸)·'이름 : 값' 줄만 읽음
+        const pgL = buildLines(words.map(w => ({s: w.s, x0: w.x0, x1: w.x1, y0: w.y0, y1: w.y1})), 6);
+        Object.entries({...colonPairs(pgL), ...headerTables(pgL)}).forEach(([k2, v]) => {
+          if (k2 === 'period') { const pr = toPeriod(v); if (pr.start && !res.project.start) { res.project.start = pr.start; res.project.end = pr.end; } }
+          else if (k2.startsWith('org.')) { if (isBlank(getP(res.org, k2.slice(4)))) setP(res.org, k2.slice(4), v); } else if (isBlank(res.project[k2])) res.project[k2] = v;
+          if (!res.used.includes('table')) res.used.push('table');
+        });
+      };
+      if (!kind) { genericOnly(); continue; }
+      if (res.used.includes(kind)) continue;
       const F = SCAN_FORMS[kind];
       // 2) 항목 이름 찾기(연속된 글자 조각을 이어 붙여 비슷한 글자열 찾기) → 원본 서식 좌표와 맞춤
       // 같은 낱말이 한 쪽에 여러 번 나올 수 있으므로(예: 위쪽 '단체명'과 서명란 '단체명') 후보를 모두 모은 뒤,
@@ -2369,8 +2378,8 @@ async function ocrForms(doc, onProg) {
         if (inl.length > best.votes) best = {votes: inl.length, inl};
       });
       const inl = best.inl || [];
+      if (inl.length < 2) { genericOnly(); continue; } // 서식 제목이 비슷해도 항목 위치가 맞지 않으면 다른 서식으로 보고 표 규칙으로 읽음
       const fx = fit1(inl.map(o => [o.ax, o.x])) || {a: 1, b: 0}, fy = fit1(inl.map(o => [o.ay, o.y])) || {a: 1, b: 0};
-      if (inl.length < 2) res.weak++;
       const T = (x, y) => [(fx.a * x + fx.b) * k, (fy.a * y + fy.b) * k];
       // 3) 칸별 글자 인식
       const readBox = async (x0, y0, x1, y1, block) => {
@@ -2385,7 +2394,8 @@ async function ocrForms(doc, onProg) {
         if (r.confidence < 45 || good < Math.max(1, t.replace(/\s/g, '').length * 0.5)) return ''; // 믿기 어려운 결과(잡티·선 등)는 버림
         return t;
       };
-      const set = (k2, v) => { if (v === '' || v == null) return; if (k2.startsWith('org.')) setP(res.org, k2.slice(4), v); else res.project[k2] = v; };
+      const looksLabel = v => typeof v === 'string' && [2, 3, 4, 5, 6].some(n => vocabOf(nz(v).slice(0, n))); // 값 자리에 항목 이름이 읽힌 경우
+      const set = (k2, v) => { if (v === '' || v == null || looksLabel(v)) return; if (k2.startsWith('org.')) setP(res.org, k2.slice(4), v); else res.project[k2] = v; };
       const total = (F.fields || []).length + (F.tables || []).reduce((s, t) => s + (t[1].length - 1) * t[2].length, 0); let done = 0;
       const tick = () => onProg?.(`${i}/${n}쪽 — 칸별 글자 인식 (${++done}/${total})`, ((i - 1) + done / total) / n);
       const read = (...a) => readBox(...a).then(t => { tick(); return t; });
@@ -2475,9 +2485,18 @@ function readColumn(pg, X, defs) {
     const prev = found.slice(0, i).reverse().find(f => f.L), next = found.slice(i + 1).find(f => f.L);
     const top = prev ? (prev.L.c + d.L.c) / 2 : d.L.c - (next ? (next.L.c - d.L.c) / 2 : 12);
     const bot = next ? (next.L.c + d.L.c) / 2 : d.L.c + (prev ? (d.L.c - prev.L.c) / 2 : 12);
-    out[d.k] = textIn(pg, {x0: Math.max(X(d.v0), d.L.x1 + 1), x1: X(d.v1), y0: top, y1: bot});
+    let v = textIn(pg, {x0: Math.max(X(d.v0), d.L.x1 + 1), x1: X(d.v1), y0: top, y1: bot});
+    if (!v || vocabOf(v.split('\n')[0]) || vocabOf(nz(v).slice(0, 8))) v = belowOf(pg, d.L) || (vocabOf(v.split('\n')[0]) ? '' : v); // 오른쪽이 다른 항목 이름이면 아래 칸
+    out[d.k] = v;
   });
   return out;
+}
+/* 항목 이름 바로 아래 칸의 글자(표의 제목행 구조): 같은 줄 오른쪽 다음 항목 이름 앞까지의 폭 */
+function belowOf(pg, L) {
+  const cells = lineCells(L.line), nextX = cells.filter(c => c.x0 > L.x1 + 2 && c.v).map(c => c.x0)[0] ?? L.x1 + 140;
+  const x0 = L.x0 - 12, x1 = nextX - 2;
+  const vl = pg.lines.find(l => l.y0 > L.y1 - 1 && l.y0 - L.y1 < 40 && l.items.some(it => { const x = (it.x0 + it.x1) / 2; return x >= x0 && x < x1; }) && !lineCells(l).every(c => c.v));
+  return vl ? vl.items.filter(it => { const x = (it.x0 + it.x1) / 2; return x >= x0 && x < x1; }).map(it => it.s).join(' ').trim() : '';
 }
 function rowsTable(pg, X, xs, y0, y1, keyCol = 0) { // 표 영역의 줄들을 열 경계로 나누어 행 만들기(이어지는 줄은 앞 행에 붙임)
   const bx = xs.map(X), rows = [];
@@ -2582,6 +2601,76 @@ const PARSERS = {
     return {fields: burden.length ? {burden} : {}};
   },
 };
+/* ---- 제목행 표 읽기: 위 칸에 항목 이름이 나란히 있고 값은 그 아래 칸에 있는 표
+   예) 교부신청서·관리카드의 "단체명 | 소재지 주소 | 전화번호 | 대표자(성명 | 연락처)" → 각 이름 바로 아래 칸의 글자를 읽음 */
+const HEAD_VOCAB = [
+  [/^(단체명|단체명\(상호\)|상호|성명\/단체명|보조단체명|보조사업자명|기관명\/이름|기관·단체명|기관ㆍ단체명|신청단체명)$/, 'org.name'],
+  [/^(소재지|소재지주소|주소|소재지\(주소\)|단체주소)$/, 'org.location'], [/^(전화번호|단체전화|사무실전화)$/, 'org.phone'],
+  [/^(대표자|대표자명|대표자성명)$/, 'org.rep.name'], [/^성명$/, 'NAME'], [/^(연락처|연락처\(핸드폰\)|휴대전화|휴대폰|핸드폰|연락처\(휴대폰\))$/, 'PHONE'],
+  [/^(사업자등록번호|사업자번호|고유번호|사업자등록번호\(고유번호\))/, 'org.bizNo'], [/^(보조사업명|사업명|신청사업명|세부사업명)$/, 'name'], [/^(사업기간|보조사업기간)$/, 'period'],
+  [/^(직위|직책)$/, 'POS'], [/^(이메일|E-?mail)$/i, 'MAIL'], [/^(사업담당자|담당자|실무책임자)$/, 'P:mgr'],
+];
+function tidyWords(s) { // 글자 인식 결과 정리: '김 대 표'→'김대표', 같은 낱말이 연달아 두 번 나오면 하나로, 직인·서명 자리 표시는 버림
+  const w = String(s || '').replace(/\(\s*(직인|인|서명|서명\s*또는\s*인)\s*\)/g, ' ').replace(/\s+/g, ' ').trim().split(' ')
+    .map(x => /^(?:([가-힣])\1){2,}$/.test(x) ? x.replace(/([가-힣])\1/g, '$1') : x) // '담담읍읍'처럼 글자가 두 번씩 읽힌 경우
+    .filter((x, i, a) => x && x !== a[i - 1]);
+  const out = [];
+  w.forEach(x => { const p = out[out.length - 1]; if (p && x.length === 1 && /[가-힣]/.test(x) && /[가-힣]$/.test(p) && (p.length === 1 || p.single)) { out[out.length - 1] = Object.assign(new String(p + x), {single: true}); } else out.push(x.length === 1 ? Object.assign(new String(x), {single: true}) : x); });
+  return out.map(String).join(' ');
+}
+const vocabOf = t => { const n = nz(t).replace(/[:：]$/, ''); const h = HEAD_VOCAB.find(([re]) => re.test(n)); return h ? h[1] : null; };
+function lineCells(l, gap = 14) { // 한 줄의 글자 조각을 가까운 것끼리 묶어 칸 단위로(‘성   명’처럼 띄워 쓴 한 글자들은 더 넓게 묶음)
+  const cells = [];
+  l.items.forEach(it => {
+    const c = cells[cells.length - 1], h = it.y1 - it.y0, wide = c && nz(c.last).length === 1 && nz(it.s).length <= 2 ? Math.max(gap, h * 2) : gap;
+    if (c && it.x0 - c.x1 < wide) { c.t += (it.x0 - c.x1 > 2 && !/\s$/.test(c.t) ? ' ' : '') + it.s; c.x1 = Math.max(c.x1, it.x1); c.last = it.s; } else cells.push({t: it.s, x0: it.x0, x1: it.x1, last: it.s});
+  });
+  return cells.map(c => ({...c, v: vocabOf(c.t), cx: (c.x0 + c.x1) / 2}));
+}
+function headerTables(pg) {
+  const out = {}, L = pg.lines;
+  for (let i = 0; i < L.length; i++) {
+    // 이름만 있는 줄들이 이어진 덩어리(제목행)를 찾음 — '대표자' 아래 '성명·연락처'처럼 두세 줄일 수 있음
+    const block = [];
+    for (let j = i; j < L.length && j < i + 4; j++) {
+      if (block.length && L[j].y0 - L[block[block.length - 1]].y1 > 18) break;
+      const cs = lineCells(L[j]); if (!cs.length || cs.some(c => !c.v)) break;
+      block.push(j);
+    }
+    const cells = block.flatMap(j => lineCells(L[j]).map(c => ({...c, line: j})));
+    // 바로 아래 줄에 좌우로 나뉜 하위 이름이 있으면 상위 이름(예: 대표자 → 성명 | 연락처)
+    const isParent = c => { const lows = cells.filter(o => o.line > c.line && Math.abs(o.cx - c.cx) < 85); return lows.some(o => o.cx < c.cx) && lows.some(o => o.cx > c.cx); };
+    const leaves = cells.filter(c => !isParent(c));
+    const fields = leaves.filter(c => !c.v.startsWith('P:'));
+    if (block.length === 0 || fields.length < 2) continue;
+    const parentOf = c => cells.filter(o => o.line < c.line && isParent(o) && Math.abs(o.cx - c.cx) < 85).sort((a, b) => Math.abs(a.cx - c.cx) - Math.abs(b.cx - c.cx))[0];
+    const keyOf = c => { const p = parentOf(c), pk = p ? (p.v === 'P:mgr' ? 'mgr' : p.v === 'org.rep.name' ? 'rep' : '') : '';
+      if (c.v === 'NAME') return pk === 'mgr' ? 'org.mgr.name' : 'org.rep.name'; if (c.v === 'PHONE') return pk === 'mgr' ? 'org.mgr.phone' : 'org.rep.phone';
+      if (c.v === 'POS') return pk === 'mgr' ? 'org.mgr.position' : null; if (c.v === 'MAIL') return 'org.mgr.email'; return c.v; };
+    fields.sort((a, b) => a.cx - b.cx);
+    const bounds = fields.map((c, k) => [k ? (fields[k - 1].cx + c.cx) / 2 : c.x0 - 60, k < fields.length - 1 ? (c.cx + fields[k + 1].cx) / 2 : c.x1 + 120]);
+    const last = block[block.length - 1], vl = L.slice(last + 1).find(l => l.y0 > L[last].y1 - 1 && l.y0 - L[last].y1 < 40 && lineCells(l).some(c => !c.v));
+    if (!vl) { i = last; continue; }
+    const runs = lineCells(vl, 12); // 값 줄은 가까운 낱말끼리 한 칸으로 묶은 뒤 칸의 가운데로 열을 정함(주소처럼 여러 낱말인 값)
+    fields.forEach((c, k) => {
+      const key = keyOf(c); if (!key) return;
+      const t = tidyWords(runs.filter(r => r.cx >= bounds[k][0] && r.cx < bounds[k][1]).map(r => r.t).join(' '));
+      if (t && !vocabOf(t) && out[key] == null) out[key] = t;
+    });
+    i = last;
+  }
+  return out;
+}
+/* "○ 사 업 명 : …" 처럼 이름 뒤 쌍점(:) 다음에 값이 있는 줄 */
+function colonPairs(pg) {
+  const out = {}, M = [[/^○?(사업명|보조사업명)$/, 'name'], [/^○?사업기간$/, 'period'], [/^○?사업장소$/, 'place'], [/^○?사업목적$/, 'purpose'], [/^○?사업내용$/, 'content'], [/^○?(단체명)$/, 'org.name']];
+  pg.lines.forEach(l => {
+    const m = l.t.match(/^\s*(.+?)\s*[:：]\s*(.+)$/); if (!m) return;
+    const hit = M.find(([re]) => re.test(nz(m[1]))); if (!hit || out[hit[1]] != null) return;
+    const v = tidyWords(m[2]); if (v && !vocabOf(v)) out[hit[1]] = v;
+  });
+  return out;
+}
 function classify(pg) {
   const head = pg.lines.slice(0, 14).map(l => l.n).join('|'), all = pg.lines.map(l => l.n).join('|');
   if (/지방보조금지원신청서/.test(head)) return 'f1';
@@ -2597,27 +2686,34 @@ async function parseApplicationPdf(file, onProg, forceOcr) {
   if (pay && pay.org && pay.project) return {source: 'data', org: pay.org, project: pay.project, notes: ['이 프로그램에서 만든 PDF라서 입력 내용을 그대로 불러왔습니다.']};
   const textChars = pages.reduce((s, p) => s + p.lines.reduce((t, l) => t + l.n.length, 0), 0);
   // 글자가 있어도 서식을 하나도 못 알아보면(글꼴이 깨진 PDF 등) 글자 인식으로 전환
-  const noForm = textChars >= 30 && !pages.some(pg => classify(pg));
+  const generic = pages.map(pg => ({...colonPairs(pg), ...headerTables(pg)})); // 제목행 표(값이 아래 칸)·'이름 : 값' 줄
+  const genericN = generic.reduce((s, g) => s + Object.keys(g).length, 0);
+  const noForm = textChars >= 30 && !pages.some(pg => classify(pg)) && genericN < 2;
   if (textChars < 30 || forceOcr || noForm) { // 스캔 PDF → 서식 칸별 글자 인식
     const r = await ocrForms(doc, onProg);
-    const names = {f1: '서식1 지원신청서', f1_1a: '서식1-1 사업계획서', f1_1b: '서식1-1 사업계획서(사업비 등)', f1_3: '서식1-3 경비부담내역'};
+    const names = {f1: '서식1 지원신청서', f1_1a: '서식1-1 사업계획서', f1_1b: '서식1-1 사업계획서(사업비 등)', f1_3: '서식1-3 경비부담내역', table: '표(항목 이름 아래 칸의 값)'};
     if (!r.used.length) return {source: 'none', org: {}, project: {}, notes: ['스캔 PDF에서 지원신청서·사업계획서·경비부담내역 서식을 찾지 못했습니다. 더 선명하게(300dpi 이상, 똑바로) 스캔해 보세요.']};
     return {source: 'ocr', org: r.org, project: r.project, notes: ['스캔 PDF라서 서식 칸마다 글자 인식(OCR)으로 읽었습니다. 글자가 틀리거나 빠질 수 있으니 원본과 꼭 비교하세요.',
       `읽은 서식: ${r.used.map(u => names[u]).join(', ')}`, ...(r.weak ? ['일부 쪽은 위치 맞춤 기준을 충분히 찾지 못해 칸이 어긋났을 수 있습니다.'] : [])]};
   }
   const org = {}, project = {}, notes = scanned ? ['스캔 PDF라서 글자 인식(OCR)으로 읽었습니다. 글자가 틀리거나 빠질 수 있으니 원본과 꼭 비교하세요.'] : [], used = [];
+  const put = (k, v) => {
+    if (v === '' || v == null || (typeof v === 'string' && vocabOf(v))) return; // 값 자리에 항목 이름이 들어간 경우는 버림
+    if (k === 'period') { const pr = toPeriod(v); if (pr.start && isBlank(project.start)) { project.start = pr.start; project.end = pr.end; } return; }
+    if (k.startsWith('org.')) { if (isBlank(getP(org, k.slice(4)))) setP(org, k.slice(4), v); }
+    else if (isBlank(project[k]) || (Array.isArray(v) && !(project[k] || []).length)) project[k] = v;
+  };
+  // 제목행 표를 먼저 반영(값은 항목 이름 '아래' 칸) → 그다음 서식별 위치 읽기로 빈 항목만 채움
+  generic.forEach(g => Object.entries(g).forEach(([k, v]) => put(k, k === 'org.name' || k === 'name' ? v.replace(/\s*\(.*?직인.*?\)\s*$/, '') : v)));
+  if (genericN) used.push('table');
   for (const pg of pages) {
     const kind = classify(pg); if (!kind) continue;
     const r = PARSERS[kind](pg); used.push(kind);
-    Object.entries(r.fields).forEach(([k, v]) => {
-      if (v === '' || v == null) return;
-      if (k.startsWith('org.')) { if (isBlank(getP(org, k.slice(4)))) setP(org, k.slice(4), v); }
-      else if (isBlank(project[k]) || (Array.isArray(v) && !(project[k] || []).length)) project[k] = v;
-    });
+    Object.entries(r.fields).forEach(([k, v]) => put(k, v));
     if (r.totals) project._totals = r.totals;
   }
   if (!used.length) notes.push('지원신청서·사업계획서·경비부담내역 서식을 찾지 못했습니다. 원본 서식을 고쳐서 만든 경우 일부만 읽힐 수 있습니다.');
-  else notes.push(`읽은 서식: ${[...new Set(used.map(u => ({f1: '서식1 지원신청서', f1_1a: '서식1-1 사업계획서', f1_1b: '서식1-1 사업계획서(사업비 등)', f1_3: '서식1-3 경비부담내역'}[u])))].join(', ')}`);
+  else notes.push(`읽은 서식: ${[...new Set(used.map(u => ({f1: '서식1 지원신청서', f1_1a: '서식1-1 사업계획서', f1_1b: '서식1-1 사업계획서(사업비 등)', f1_3: '서식1-3 경비부담내역', table: '표(항목 이름 아래 칸의 값)'}[u])))].join(', ')}`);
   if (project._totals && !project.budget) {
     const t = project._totals; if (t.total) project.budget = [{item: '사업비', calc: '(신청서 총액 기준 — 비목별 내역 확인 필요)', subsidy: t.sub || '', self: t.total && t.sub ? t.total - t.sub : '', other: '', method: ''}];
     notes.push('사업비 집행계획 표를 찾지 못해 신청서의 총액만 한 줄로 넣었습니다.');
