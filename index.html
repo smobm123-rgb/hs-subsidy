@@ -2287,147 +2287,98 @@ function buildLines(items, tol) { // 글자 조각들을 같은 높이끼리 묶
   lines.forEach(l => { l.items.sort((a, b) => a.x0 - b.x0); l.t = l.items.map(i => i.s).join(''); l.n = l.t.replace(/\s+/g, ''); });
   return {lines};
 }
-/* 스캔(그림) PDF 읽기 — 서식 모양을 알고 있으므로:
-   1) 쪽을 그림으로 그려 기울기를 바로잡고  2) 인쇄된 항목 이름 몇 개를 찾아 원본 서식과 위치를 맞춘 뒤
-   3) 원본 서식의 칸 위치를 하나씩 잘라 따로 글자 인식(Tesseract, 한국어) → 표가 많은 서식에서도 칸 단위로 정확도가 높음 */
+/* 스캔(그림) PDF 읽기: 쪽 전체를 글자 인식(Tesseract, 한국어)해 글자 PDF와 같은 '줄' 목록을 만든 뒤,
+   글자 PDF와 똑같이 항목 이름(단체명, 사업명 :, 표 제목 줄 …)을 찾아 옆·아래 칸을 읽음.
+   → 서식 모양(칸 크기·줄 수)이 원본과 조금 달라도 항목 이름을 기준으로 찾음 */
 const TESS = 'https://cdn.jsdelivr.net/npm/tesseract.js@5.1.1/dist/tesseract.min.js';
-const SCAN_FORMS = {
-  f1: {title: /지원신청|원신청서|보조금지원/, anchors: [['단체명', 102, 138], ['소재지', 102, 187], ['신청사업명', 104, 370], ['사업장소', 345, 393], ['E-mail', 405, 310], ['총사업비', 107, 490]],
-    fields: [['org.name', 173, 131, 365, 155], ['org.founded', 173, 155, 365, 180, 'date'], ['org.location', 173, 180, 365, 205], ['org.membersTotal', 173, 205, 365, 226, 'num'],
-      ['org.regDept', 173, 226, 365, 254, 'note'], ['org.regDate', 173, 254, 365, 275, 'date'], ['org.regNo', 173, 275, 365, 298], ['org.rep.name', 173, 298, 365, 319], ['org.rep.phone', 173, 319, 365, 341],
-      ['org.rep.address', 173, 341, 538, 364], ['org.mgr.name', 438, 131, 538, 184], ['org.mgr.position', 438, 184, 538, 236], ['org.mgr.phone', 438, 236, 538, 289], ['org.mgr.email', 438, 289, 538, 341],
-      ['name', 173, 364, 331, 387], ['dept', 403, 364, 538, 387], ['period', 173, 387, 331, 410, 'period'], ['place', 403, 387, 538, 410], ['purpose', 173, 410, 538, 433, 'block'],
-      ['content', 173, 433, 538, 471, 'block'], ['applyDate', 290, 572, 450, 594, 'date']]},
-  f1_1a: {title: /사업계획서|업계획서|신청단체/, anchors: [['단체명', 87, 193], ['사업명', 87, 516], ['사업기간', 87, 587], ['사업장소', 87, 611], ['사업효과', 87, 707], ['정회원', 333, 358]],
-    fields: [['org.name', 162, 191, 545, 210], ['org.mainBiz', 84, 243, 545, 300, 'block'], ['org.officers.chair', 140, 378, 237, 397], ['org.officers.vice', 140, 397, 237, 416], ['org.officers.secretary', 140, 416, 237, 436],
-      ['org.membersTotal', 239, 374, 313, 437, 'num'], ['org.membersRegular', 313, 374, 390, 437, 'num'], ['org.membersAssoc', 390, 374, 466, 437, 'num'], ['org.membersOther', 466, 374, 543, 437, 'num'],
-      ['org.assets', 263, 449, 311, 468, 'chun'], ['org.debts', 419, 449, 474, 468, 'chun'], ['name', 162, 513, 545, 534], ['purpose', 87, 559, 545, 587, 'block'], ['period', 162, 585, 545, 606, 'period'],
-      ['place', 162, 609, 545, 630], ['content', 87, 654, 545, 707, 'block'], ['effect', 87, 726, 545, 789, 'block']]},
-  f1_1b: {title: /사업비집행|일정별|수입될수입금|신청내역/, anchors: [['일정', 82, 300], ['세부사업내용', 237, 300], ['지출비목', 60, 483], ['사용방법', 492, 483], ['사업명', 93, 667], ['활용방법', 407, 667]],
-    tables: [['schedule', [322, 362, 401], [52, 134, 412, 488, 542], ['when', 'content', 'budget:chun', 'people:num']],
-      ['budget', [538, 561, 583, 606], [52, 116, 217, 276, 335, 385, 436, 488, 542], ['item', 'calc', '-', 'subsidy:chun', '-', 'self:chun', 'other:chun', 'method']],
-      ['income', [711, 737, 763], [52, 169, 252, 371, 488, 542], ['name', 'amount:chun', 'content', 'use', 'note']]]},
-  f1_3: {title: /경비부담|부담내역|보조금외/, anchors: [['부담자성명', 171, 145], ['부담금액', 275, 145], ['부담방법', 373, 145], ['비고', 482, 145]],
-    tables: [['burden', [192, 219, 246, 274, 302, 329, 356, 384, 411, 439, 466, 494, 521, 549, 576, 604, 631, 659, 686], [151, 249, 347, 445, 543], ['who', 'amount:chun', 'how', 'note'], {type: '자부담'}],
-      ['burden', [686, 714, 741, 768], [151, 249, 347, 445, 543], ['who', 'amount:chun', 'how', 'note'], {type: '기타'}]]},
-};
 const lev = (a, b) => { const d = Array.from({length: a.length + 1}, (_, i) => [i]); for (let j = 1; j <= b.length; j++) d[0][j] = j; for (let i = 1; i <= a.length; i++) for (let j = 1; j <= b.length; j++) d[i][j] = Math.min(d[i - 1][j] + 1, d[i][j - 1] + 1, d[i - 1][j - 1] + (a[i - 1] === b[j - 1] ? 0 : 1)); return d[a.length][b.length]; };
-const ocrClean = s => (s || '').replace(/[|｜\[\]{}_~`¦]/g, ' ').replace(/[ \t]+/g, ' ').split('\n').map(x => x.trim()).filter(Boolean).join('\n');
-function fit1(pairs) { // y = a·x + b (점이 하나면 이동만)
-  if (pairs.length < 2) return pairs.length ? {a: 1, b: pairs[0][1] - pairs[0][0]} : null;
-  const n = pairs.length, sx = pairs.reduce((s, p) => s + p[0], 0), sy = pairs.reduce((s, p) => s + p[1], 0), sxx = pairs.reduce((s, p) => s + p[0] * p[0], 0), sxy = pairs.reduce((s, p) => s + p[0] * p[1], 0);
-  const den = n * sxx - sx * sx; if (Math.abs(den) < 1e-6) return {a: 1, b: (sy - sx) / n};
-  const a = (n * sxy - sx * sy) / den; return a > 0.8 && a < 1.25 ? {a, b: (sy - a * sx) / n} : {a: 1, b: (sy - sx) / n};
-}
 function rotated(src, rad, w, h) { // src를 -rad 만큼 돌려 w×h 캔버스로
   const cv = document.createElement('canvas'); cv.width = w; cv.height = h;
   const cx = cv.getContext('2d'); cx.fillStyle = '#fff'; cx.fillRect(0, 0, w, h);
   cx.translate(w / 2, h / 2); cx.rotate(-rad); cx.drawImage(src, -w / 2, -h / 2, w, h); cx.setTransform(1, 0, 0, 1, 0, 0);
   return cv;
 }
-async function ocrForms(doc, onProg) {
+function buildLinesOcr(items) { // 낱말 상자를 세로 가운데가 겹치는 것끼리 한 줄로(스캔은 낱말마다 높이가 조금씩 다름)
+  items.sort((a, b) => (a.y0 + a.y1) / 2 - (b.y0 + b.y1) / 2);
+  const lines = [];
+  for (const it of items) {
+    const cy = (it.y0 + it.y1) / 2, h = it.y1 - it.y0;
+    const L = lines.find(l => Math.abs(l.cy - cy) < Math.max(3.5, Math.min(h, l.h) * 0.55));
+    if (L) { L.items.push(it); L.y0 = Math.min(L.y0, it.y0); L.y1 = Math.max(L.y1, it.y1); L.cy = (L.y0 + L.y1) / 2; L.h = Math.max(L.h, h); }
+    else lines.push({y0: it.y0, y1: it.y1, cy, h, items: [it]});
+  }
+  lines.sort((a, b) => a.y0 - b.y0);
+  lines.forEach(l => { l.items.sort((a, b) => a.x0 - b.x0); l.t = l.items.map((i, k) => (k && i.x0 - l.items[k - 1].x1 > 1.5 ? ' ' : '') + i.s).join(''); l.n = l.t.replace(/\s+/g, ''); l.ocr = true; });
+  return {lines};
+}
+/* 표 칸 찾기: 긴 가로·세로 선을 벽으로 보고, 벽으로 막힌 빈 영역 하나하나가 칸 (그림 크기의 1/4 격자에서 채우기) */
+function tableCells(cv) {
+  const W = cv.width, H = cv.height, d = cv.getContext('2d').getImageData(0, 0, W, H).data;
+  const dark = new Uint8Array(W * H); for (let i = 0; i < W * H; i++) dark[i] = d[i * 4] + d[i * 4 + 1] + d[i * 4 + 2] < 570 ? 1 : 0;
+  const S = 4, w = Math.ceil(W / S), h = Math.ceil(H / S), wall = new Uint8Array(w * h), minH = Math.round(W * 0.03), minV = Math.round(W * 0.012);
+  const mark = (x, y) => { wall[((y / S) | 0) * w + ((x / S) | 0)] = 1; };
+  // 선이 한두 화소 흔들리거나 살짝 끊겨도(3화소까지) 이어진 선으로 봄
+  for (let y = 1; y < H - 1; y++) { let run = 0, gap = 0, st = 0; for (let x = 0; x <= W; x++) { const on = x < W && (dark[y * W + x] || dark[(y - 1) * W + x] && dark[(y + 1) * W + x]); if (on) { if (!run) st = x; run++; gap = 0; } else if (run && gap < 3 && x < W) { gap++; run++; } else { if (run - gap >= minH) for (let k = st; k < x - gap; k++) mark(k, y); run = 0; gap = 0; } } }
+  for (let x = 1; x < W - 1; x++) { let run = 0, gap = 0, st = 0; for (let y = 0; y <= H; y++) { const on = y < H && dark[y * W + x]; if (on) { if (!run) st = y; run++; gap = 0; } else if (run && gap < 3 && y < H) { gap++; run++; } else { if (run - gap >= minV) for (let k = st; k < y - gap; k++) mark(x, k); run = 0; gap = 0; } } }
+  const seen = new Uint8Array(w * h), cells = [];
+  for (let s = 0; s < w * h; s++) {
+    if (wall[s] || seen[s]) continue;
+    let x0 = w, x1 = 0, y0 = h, y1 = 0, n = 0, edge = false; const st = [s]; seen[s] = 1;
+    while (st.length) {
+      const p = st.pop(), x = p % w, y = (p / w) | 0; n++;
+      if (x < x0) x0 = x; if (x > x1) x1 = x; if (y < y0) y0 = y; if (y > y1) y1 = y; if (!x || !y || x === w - 1 || y === h - 1) edge = true;
+      if (x > 0 && !wall[p - 1] && !seen[p - 1]) { seen[p - 1] = 1; st.push(p - 1); } if (x < w - 1 && !wall[p + 1] && !seen[p + 1]) { seen[p + 1] = 1; st.push(p + 1); }
+      if (y > 0 && !wall[p - w] && !seen[p - w]) { seen[p - w] = 1; st.push(p - w); } if (y < h - 1 && !wall[p + w] && !seen[p + w]) { seen[p + w] = 1; st.push(p + w); }
+    }
+    const bw = x1 - x0 + 1, bh = y1 - y0 + 1;
+    if (edge || bw < 8 || bh < 5 || bw * bh > w * h * 0.3 || n < bw * bh * 0.6) continue; // 바깥 여백·너무 큰 영역·네모가 아닌 영역은 칸이 아님
+    // 칸 안에 글자가 거의 없으면(빈칸) 건너뜀
+    let ink = 0; for (let yy = y0 * S + 6; yy < (y1 + 1) * S - 6; yy += 2) for (let xx = x0 * S + 6; xx < (x1 + 1) * S - 6; xx += 2) ink += dark[yy * W + xx];
+    if (ink < 12) continue;
+    cells.push({x0: x0 * S, y0: y0 * S, x1: (x1 + 1) * S, y1: (y1 + 1) * S});
+  }
+  return cells;
+}
+async function ocrPages(doc, onProg) {
   if (!window.Tesseract) await loadScript(TESS);
+  const n = Math.min(doc.numPages, 12);
   onProg?.('loading', 0);
-  // 일꾼 3개: 한 줄 칸용 2개 + 여러 줄 칸·쪽 전체용 1개 → 칸들을 동시에 인식
-  const mk = async psm => { const w = await Tesseract.createWorker('kor+eng', 1, {logger: m => { if (/loading|initializ/.test(m.status)) onProg?.('loading', m.progress); }}); await w.setParameters({tessedit_pageseg_mode: psm, preserve_interword_spaces: '1'}); w.busy = 0; return w; };
-  const pool = {line: await Promise.all([mk('7'), mk('7')]), block: [await mk('6')]};
-  const run = async (type, img) => { const ws = pool[type], w = ws.reduce((a, b) => a.busy <= b.busy ? a : b); w.busy++; try { return (await w.recognize(img)).data; } finally { w.busy--; } };
-  const worker = pool.block[0];
-  const res = {org: {}, project: {}, used: [], weak: 0};
+  const w = await Tesseract.createWorker('kor+eng', 1, {logger: m => { if (/loading|initializ/.test(m.status)) onProg?.('loading', m.progress); }});
+  const pages = [], clean = s => s.replace(/[|｜\[\]{}_~`¦]/g, '').trim();
   try {
-    const n = Math.min(doc.numPages, 10);
-    for (let i = 1; i <= n; i++) {
-      onProg?.(`${i}/${n}쪽 — 쪽 모양 확인`, (i - 1) / n);
-      const pg = await doc.getPage(i), v1 = pg.getViewport({scale: 1}), vp = pg.getViewport({scale: 2200 / v1.width});
+    for (let cur = 1; cur <= n; cur++) {
+      onProg?.(`${cur}/${n}쪽 글자 인식 중`, (cur - 1) / n);
+      const pg = await doc.getPage(cur), v1 = pg.getViewport({scale: 1}), vp = pg.getViewport({scale: 2400 / v1.width});
       const src = document.createElement('canvas'); src.width = Math.round(vp.width); src.height = Math.round(vp.height);
       await pg.render({canvasContext: src.getContext('2d'), viewport: vp, intent: 'print'}).promise; // print: 화면 갱신을 기다리지 않음(다른 탭으로 가도 계속 진행)
-      // 1) 작은 그림으로 기울기 찾기 → 바로 세운 뒤 전체 글자 위치(항목 이름 찾기용)
-      const sw = 1300, sh = Math.round(src.height * sw / src.width), small = rotated(src, 0, sw, sh);
-      await worker.setParameters({tessedit_pageseg_mode: '11'});
-      let {data} = await worker.recognize(small, {rotateAuto: true});
-      const rad = data.rotateRadians || 0;
-      const cv = rotated(src, rad, src.width, src.height);
-      if (Math.abs(rad) > 0.002) ({data} = await worker.recognize(rotated(src, rad, sw, sh)));
-      await worker.setParameters({tessedit_pageseg_mode: '6'});
-      const ks = sw / 595, k = cv.width / 595, words = (data.words || []).map(w => ({s: w.text, t: nz(w.text), x0: w.bbox.x0 / ks, y0: w.bbox.y0 / ks, x1: w.bbox.x1 / ks, y1: w.bbox.y1 / ks})).filter(w => w.t);
-      const all = words.map(w => w.t).join('');
-      const kind = Object.keys(SCAN_FORMS).find(f => SCAN_FORMS[f].title.test(all.slice(0, 400)) || SCAN_FORMS[f].title.test(all));
-      const genericOnly = () => { // 모르는 서식: 제목행 표(값은 아래 칸)·'이름 : 값' 줄만 읽음
-        const pgL = buildLines(words.map(w => ({s: w.s, x0: w.x0, x1: w.x1, y0: w.y0, y1: w.y1})), 6);
-        Object.entries({...colonPairs(pgL), ...headerTables(pgL)}).forEach(([k2, v]) => {
-          if (k2 === 'period') { const pr = toPeriod(v); if (pr.start && !res.project.start) { res.project.start = pr.start; res.project.end = pr.end; } }
-          else if (k2.startsWith('org.')) { if (isBlank(getP(res.org, k2.slice(4)))) setP(res.org, k2.slice(4), v); } else if (isBlank(res.project[k2])) res.project[k2] = v;
-          if (!res.used.includes('table')) res.used.push('table');
-        });
-      };
-      if (!kind) { genericOnly(); continue; }
-      if (res.used.includes(kind)) continue;
-      const F = SCAN_FORMS[kind];
-      // 2) 항목 이름 찾기(연속된 글자 조각을 이어 붙여 비슷한 글자열 찾기) → 원본 서식 좌표와 맞춤
-      // 같은 낱말이 한 쪽에 여러 번 나올 수 있으므로(예: 위쪽 '단체명'과 서명란 '단체명') 후보를 모두 모은 뒤,
-      // 가장 많은 항목 이름이 동의하는 이동량을 고르고 그 항목들로만 맞춤
-      const cands = F.anchors.map(([lab, ax, ay]) => {
-        const out = [];
-        for (let a = 0; a < words.length; a++) { let acc = ''; for (let b = a; b < Math.min(words.length, a + 6); b++) { if (b > a && Math.abs(words[b].y0 - words[a].y0) > 6) break; acc += words[b].t; if (lev(acc, lab) <= Math.floor(lab.length / 4)) { out.push({ax, ay, x: words[a].x0, y: words[a].y0}); break; } } }
-        return out;
-      });
-      let best = {votes: 0};
-      cands.flat().forEach(c => {
-        const dx = c.x - c.ax, dy = c.y - c.ay;
-        const inl = cands.map(list => list.find(o => Math.abs(o.x - o.ax - dx) < 14 && Math.abs(o.y - o.ay - dy) < 10)).filter(Boolean);
-        if (inl.length > best.votes) best = {votes: inl.length, inl};
-      });
-      const inl = best.inl || [];
-      if (inl.length < 2) { genericOnly(); continue; } // 서식 제목이 비슷해도 항목 위치가 맞지 않으면 다른 서식으로 보고 표 규칙으로 읽음
-      const fx = fit1(inl.map(o => [o.ax, o.x])) || {a: 1, b: 0}, fy = fit1(inl.map(o => [o.ay, o.y])) || {a: 1, b: 0};
-      const T = (x, y) => [(fx.a * x + fx.b) * k, (fy.a * y + fy.b) * k];
-      // 3) 칸별 글자 인식
-      const readBox = async (x0, y0, x1, y1, block) => {
-        const [a, b] = T(x0 + 0.5, y0 + 2), [c, d] = T(x1 - 2, y1 - 2), w = Math.max(4, c - a), h = Math.max(4, d - b);
-        const crop = document.createElement('canvas'); crop.width = Math.round(w * 2); crop.height = Math.round(h * 2);
-        const g = crop.getContext('2d'); g.fillStyle = '#fff'; g.fillRect(0, 0, crop.width, crop.height); g.drawImage(cv, a, b, w, h, 0, 0, crop.width, crop.height);
-        const px2 = g.getImageData(0, 0, crop.width, crop.height).data; let dark = 0;
-        for (let q = 0; q < px2.length; q += 16) if ((px2[q] * 3 + px2[q + 1] * 6 + px2[q + 2]) / 10 < 120) dark++;
-        if (dark / (px2.length / 16) < 0.012) return ''; // 빈칸(잉크가 거의 없음)
-        const r = await run(block ? 'block' : 'line', crop);
-        const t = ocrClean(r.text), good = (t.match(/[가-힣0-9]/g) || []).length;
-        if (r.confidence < 45 || good < Math.max(1, t.replace(/\s/g, '').length * 0.5)) return ''; // 믿기 어려운 결과(잡티·선 등)는 버림
-        return t;
-      };
-      const looksLabel = v => typeof v === 'string' && [2, 3, 4, 5, 6].some(n => vocabOf(nz(v).slice(0, n))); // 값 자리에 항목 이름이 읽힌 경우
-      const set = (k2, v) => { if (v === '' || v == null || looksLabel(v)) return; if (k2.startsWith('org.')) setP(res.org, k2.slice(4), v); else res.project[k2] = v; };
-      const total = (F.fields || []).length + (F.tables || []).reduce((s, t) => s + (t[1].length - 1) * t[2].length, 0); let done = 0;
-      const tick = () => onProg?.(`${i}/${n}쪽 — 칸별 글자 인식 (${++done}/${total})`, ((i - 1) + done / total) / n);
-      const read = (...a) => readBox(...a).then(t => { tick(); return t; });
-      // 칸들을 한꺼번에 맡기고(일꾼 3개가 나눠 처리) 결과를 모음
-      const fieldTexts = await Promise.all((F.fields || []).map(([, x0, y0, x1, y1, how]) => read(x0, y0, x1, y1, how === 'block')));
-      (F.fields || []).forEach(([key, , , , , how], fi) => {
-        const t = fieldTexts[fi]; if (!t) return;
-        if (how === 'date') set(key, toDate(t)); else if (how === 'period') { const p = toPeriod(t); set('start', p.start); set('end', p.end); }
-        else if (how === 'num') set(key, toNum(t)); else if (how === 'chun') set(key, chunToWon(t));
-        else if (how === 'note') set(key, t.replace(/※[^\n]*/g, '').replace(/.*해당없음.*기재.*/g, '').trim());
-        else if (how === 'block') set(key, unbullet(t)); else set(key, t.replace(/\n/g, ' '));
-      });
-      for (const [tk, ys, xs, cols, extra] of (F.tables || [])) {
-        const jobs = [];
-        for (let r = 0; r < ys.length - 1; r++) cols.forEach((col, c) => { const [ck] = col.split(':'); jobs.push(ck === '-' ? Promise.resolve(tick()).then(() => '') : read(xs[c], ys[r], xs[c + 1], ys[r + 1], ck === 'content' || ck === 'calc')); });
-        const texts = await Promise.all(jobs), rows = [];
-        for (let r = 0; r < ys.length - 1; r++) {
-          const row = {...(extra || {})}; let any = false;
-          cols.forEach((col, c) => {
-            const [ck, typ] = col.split(':'); if (ck === '-') return;
-            const t = texts[r * cols.length + c]; if (!t) { row[ck] = ''; return; }
-            any = true; row[ck] = typ === 'chun' ? chunToWon(t) : typ === 'num' ? toNum(t) : t.replace(/○/g, '').trim();
-          });
-          if (any) rows.push(row);
-        }
-        const clean = rows.filter(r => !/일시,?장소|해당없음/.test(Object.values(r).join('')));
-        if (clean.length) res.project[tk] = [...(res.project[tk] || []), ...clean];
+      // 1) 작은 그림으로 기울기를 찾아 바로 세움
+      await w.setParameters({tessedit_pageseg_mode: '11', preserve_interword_spaces: '1'});
+      const sw = 1200, small = rotated(src, 0, sw, Math.round(src.height * sw / src.width));
+      const rad = (await w.recognize(small, {rotateAuto: true})).data.rotateRadians || 0;
+      const cv = Math.abs(rad) > 0.002 ? rotated(src, rad, src.width, src.height) : src;
+      const k = cv.width / 595, items = [];
+      // 2) 표의 칸을 찾아 칸마다 따로 인식(쪽 전체를 한 번에 읽는 것보다 표 안 글자가 훨씬 정확함)
+      const cells = tableCells(cv), pad = 6;
+      const rest = document.createElement('canvas'); rest.width = cv.width; rest.height = cv.height;
+      const rx = rest.getContext('2d'); rx.drawImage(cv, 0, 0); rx.fillStyle = '#fff';
+      await w.setParameters({tessedit_pageseg_mode: '6'});
+      for (let ci = 0; ci < cells.length; ci++) {
+        const c = cells[ci], cw = c.x1 - c.x0 - 2 * pad, ch = c.y1 - c.y0 - 2 * pad; if (cw < 8 || ch < 8) continue;
+        onProg?.(`${cur}/${n}쪽 표 칸 ${ci + 1}/${cells.length} 인식 중`, (cur - 1 + 0.15 + 0.7 * ci / cells.length) / n);
+        const cc = document.createElement('canvas'); cc.width = cw + 40; cc.height = ch + 40;
+        const x = cc.getContext('2d'); x.fillStyle = '#fff'; x.fillRect(0, 0, cc.width, cc.height); x.drawImage(cv, c.x0 + pad, c.y0 + pad, cw, ch, 20, 20, cw, ch);
+        rx.fillRect(c.x0 + 2, c.y0 + 2, c.x1 - c.x0 - 4, c.y1 - c.y0 - 4); // 칸 안 글자는 아래 3)에서 다시 읽지 않게 지움
+        const {data} = await w.recognize(cc), ox = c.x0 + pad - 20, oy = c.y0 + pad - 20;
+        (data.words || []).filter(wd => wd.confidence > 20).forEach(wd => { const s = clean(wd.text); if (s) items.push({s, cell: ci + 1, x0: (wd.bbox.x0 + ox) / k, x1: (wd.bbox.x1 + ox) / k, y0: (wd.bbox.y0 + oy) / k, y1: (wd.bbox.y1 + oy) / k}); });
       }
-      res.used.push(kind);
+      // 3) 표 밖 글자(제목, '사업명 : …' 줄, 서명란 등)는 칸을 지운 그림에서 줄 단위로
+      onProg?.(`${cur}/${n}쪽 표 밖 글자 인식 중`, (cur - 1 + 0.9) / n);
+      const {data} = await w.recognize(rest);
+      (data.words || []).filter(x => x.confidence > 30).forEach(x => { const s = clean(x.text); if (s) items.push({s, x0: x.bbox.x0 / k, x1: x.bbox.x1 / k, y0: x.bbox.y0 / k, y1: x.bbox.y1 / k}); });
+      pages.push({...buildLinesOcr(items), raw: items, ocr: true});
     }
-  } finally { await Promise.all([...pool.line, ...pool.block].map(w => w.terminate())); }
-  return res;
+  } finally { await w.terminate(); }
+  return pages;
 }
 async function findPayload(pages) {
   for (const pg of pages) {
@@ -2445,7 +2396,18 @@ function toDate(s) {
   const m = String(s || '').match(/(20\d{2}|19\d{2})\s*[.\-년/]\s*(\d{1,2})\s*[.\-월/]\s*(\d{1,2})/);
   return m ? `${m[1]}-${String(m[2]).padStart(2, '0')}-${String(m[3]).padStart(2, '0')}` : '';
 }
-function toPeriod(s) { const ds = [...String(s || '').matchAll(/(20\d{2})\s*[.\-년/]\s*(\d{1,2})\s*[.\-월/]\s*(\d{1,2})/g)].map(m => `${m[1]}-${String(m[2]).padStart(2, '0')}-${String(m[3]).padStart(2, '0')}`); return {start: ds[0] || '', end: ds[1] || ''}; }
+function toPeriod(s) {
+  s = String(s || '');
+  const ds = [...s.matchAll(/(20\d{2})\s*[.\-년/]\s*(\d{1,2})\s*[.\-월/]\s*(\d{1,2})/g)].map(m => `${m[1]}-${String(m[2]).padStart(2, '0')}-${String(m[3]).padStart(2, '0')}`);
+  if (ds.length) return {start: ds[0] || '', end: ds[1] || ''};
+  // 날짜 없이 '2026. 11. ~ 12.', '2026년 11월 ~ 12월'처럼 달만 적은 경우 → 시작 달 1일 ~ 끝 달 마지막 날
+  const m = s.match(/(20\d{2})\s*[.년]\s*(\d{1,2})\s*[.월]?\s*[~∼\-]\s*(?:(20\d{2})\s*[.년]\s*)?(\d{1,2})\s*[.월]?/);
+  if (!m) return {start: '', end: ''};
+  const y1 = +m[1], m1 = +m[2], m2 = +m[4], y2 = m[3] ? +m[3] : (m2 < m1 ? y1 + 1 : y1);
+  if (m1 < 1 || m1 > 12 || m2 < 1 || m2 > 12) return {start: '', end: ''};
+  const last = new Date(y2, m2, 0).getDate();
+  return {start: `${y1}-${String(m1).padStart(2, '0')}-01`, end: `${y2}-${String(m2).padStart(2, '0')}-${last}`};
+}
 const unbullet = s => (s || '').split('\n').map(x => x.replace(/^\s*[∙·•▪○◦\-ㆍ]\s*/, '').trim()).filter(x => x && !/^\(.*기재\)?$/.test(x)).join('\n');
 /* 줄 목록에서 정규화된 글자(공백 제거)로 항목 이름 찾기: x 범위 제한 가능 */
 function findLabel(pg, re, o = {}) {
@@ -2464,7 +2426,30 @@ function findLabel(pg, re, o = {}) {
       }
     }
   }
+  // 스캔 PDF: 글자 인식이 한두 글자 틀린 항목 이름도 찾기('단제명'→단체명)
+  const target = pg.ocr && plainLabel(re);
+  if (target && target.length >= 3) {
+    for (const l of pg.lines) {
+      if (o.yMin != null && l.y1 < o.yMin) continue;
+      for (let i = 0; i < l.items.length; i++) {
+        let acc = '';
+        for (let j = i; j < Math.min(l.items.length, i + 8); j++) {
+          acc += nz(l.items[j].s).replace(/[○◯:：]/g, '');
+          if (acc.length > target.length + 1) break;
+          if (lev(acc, target) <= (target.length >= 5 ? 2 : 1)) {
+            const x0 = l.items[i].x0, x1 = l.items[j].x1;
+            if (o.xMin != null && x0 < o.xMin) break; if (o.xMax != null && x0 > o.xMax) break;
+            return {x0, x1, y0: Math.min(...l.items.slice(i, j + 1).map(t => t.y0)), y1: l.y1, c: (l.y0 + l.y1) / 2, line: l};
+          }
+        }
+      }
+    }
+  }
   return null;
+}
+function plainLabel(re) { // /^○?사업명:?$/ → '사업명' (단순한 이름일 때만)
+  const s = re.source.replace(/^\^/, '').replace(/\$$/, '').replace(/^○\?/, '').replace(/:\?$/, '').replace(/\\/g, '');
+  return /^[가-힣A-Za-z\-]+$/.test(s) ? s : null;
 }
 function textIn(pg, r) { // 사각형 안 글자를 줄 단위로
   return pg.lines.map(l => l.items.filter(it => { const cx = (it.x0 + it.x1) / 2, cy = (it.y0 + it.y1) / 2; return cx >= r.x0 && cx <= r.x1 && cy >= r.y0 && cy <= r.y1; }).map(i => i.s).join('').trim()).filter(Boolean).join('\n');
@@ -2507,7 +2492,9 @@ function rowsTable(pg, X, xs, y0, y1, keyCol = 0) { // 표 영역의 줄들을 �
     if (!tr.some(Boolean)) return;
     const numsOnly = tr.every((c, i) => i === keyCol || !c);
     if (rows.length && !tr[keyCol] && !tr.slice(2).some(c => /\d/.test(c))) { tr.forEach((c, i) => { if (c) rows[rows.length - 1][i] += (rows[rows.length - 1][i] ? '\n' : '') + c; }); return; }
-    if (numsOnly && rows.length && !tr[keyCol]) return;
+    if (numsOnly && rows.length && !tr[keyCol]) { // 숫자만 아래 줄로 밀린 경우(스캔본 칸 가운데 정렬) → 앞 행의 빈 칸에 채움
+      const pr = rows[rows.length - 1]; tr.forEach((c, i) => { if (c && !pr[i]) pr[i] = c; }); return;
+    }
     rows.push(tr);
   });
   return rows;
@@ -2550,8 +2537,22 @@ const PARSERS = {
     const nm = after(/단체명:?$/); if (nm) out['org.name'] = nm;
     const mb = unbullet(block(/^○?주된사업/, /^○?단체구성현황/)); if (mb) out['org.mainBiz'] = mb;
     [['chair', /^회장:?$/], ['vice', /^부회장:?$/], ['secretary', /^총무:?$/]].forEach(([k, re]) => { const L = findLabel(pg, re); if (L) { const v = L.line.items.filter(i => i.x0 > L.x1 - 1 && i.x0 < L.x1 + 110).map(i => i.s).join('').replace(/^:/, '').trim(); if (v) out['org.officers.' + k] = v; } });
+    // 회원 수 표: '계 | 정회원 | 준회원 | 기타' 제목 아래 숫자를 x 위치가 가장 가까운 제목에 맞춤('-'는 0)
     const H = findLabel(pg, /^정회원$/);
-    if (H) { const hdr = H.line.items, cols = ['계', '정회원', '준회원', '기타'].map(t => hdr.find(i => nz(i.s).startsWith(t[0]) && nz(hdr.map(x => x.s).join('')).includes(t)) ); const rowL = pg.lines.find(l => l.y0 > H.y1 && /\d/.test(l.n) && l.items.some(i => i.x0 > H.x0 - 120)); if (rowL) { const nums = rowL.items.filter(i => /^\d[\d,]*$/.test(nz(i.s)) && i.x0 > H.x0 - 120); ['membersTotal', 'membersRegular', 'membersAssoc', 'membersOther'].forEach((k, i) => { if (nums[i]) out['org.' + k] = toNum(nums[i].s); }); } }
+    if (H) {
+      const hdr = lineCells(H.line, 10);
+      const cols = [['membersTotal', /^계$/], ['membersRegular', /^정회원$/], ['membersAssoc', /^(준회원|준회)$/], ['membersOther', /^기타$/]].map(([k, re]) => [k, hdr.find(c => re.test(nz(c.t)))]).filter(([, c]) => c);
+      const rowL = pg.lines.find(l => l.y0 > H.y1 - 1 && l.y0 - H.y1 < 60 && l.items.some(i => /^(\d[\d,]*|[-–—])$/.test(nz(i.s)) && i.x0 > H.x0 - 120));
+      if (rowL && cols.length >= 2) {
+        rowL.items.filter(i => /^(\d[\d,]*|[-–—])$/.test(nz(i.s)) && i.x0 > H.x0 - 120).forEach(i => {
+          const cx = (i.x0 + i.x1) / 2, best = cols.reduce((a, b) => Math.abs(a[1].cx - cx) <= Math.abs(b[1].cx - cx) ? a : b);
+          if (Math.abs(best[1].cx - cx) < 45) out['org.' + best[0]] = /\d/.test(i.s) ? toNum(i.s) : 0;
+        });
+      }
+      // '-'를 못 읽어 빈 칸이어도, 읽은 숫자의 합이 계와 같으면 나머지는 0
+      const T = out['org.membersTotal'], parts = ['membersRegular', 'membersAssoc', 'membersOther'];
+      if (T != null && parts.reduce((s, k) => s + (out['org.' + k] || 0), 0) === T) parts.forEach(k => { if (out['org.' + k] == null) out['org.' + k] = 0; });
+    }
     const as = findLabel(pg, /자산현황/); if (as) { const t = as.line.t, m = t.match(/자산액\s*\(\s*([\d,]+)/), d = t.match(/부채액\s*\(\s*([\d,]+)/); if (m) out['org.assets'] = chunToWon(m[1]); if (d) out['org.debts'] = chunToWon(d[1]); }
     const pn = after(/^○?사업명:?$/); if (pn) out.name = pn;
     const pp = unbullet(block(/사업목적및지원필요성$/, /^○?사업기간/)); if (pp) out.purpose = pp;
@@ -2563,7 +2564,8 @@ const PARSERS = {
   },
   // 서식1-1 사업계획서(둘째 장: 신청내역·수행계획·사업비·수입금)
   f1_1b: (pg) => {
-    const out = {}, h4 = findLabel(pg, /^4\.일정별/), h5 = findLabel(pg, /^5\.사업비/), h6 = findLabel(pg, /^6\.보조사업/);
+    const out = {}, num = (k, re) => findLabel(pg, re) || (pg.ocr && pg.lines.find(l => new RegExp(`^${k}\\.[가-힣]`).test(l.n))); // 스캔본은 제목 글자가 틀려도 '6.'으로 시작하는 줄
+    const h4 = num(4, /^4\.일정별/), h5 = num(5, /^5\.사업비/), h6 = num(6, /^6\.보조사업/);
     const anchors = [[/^지출비목$|^보조세목$/, 60], [/^사용방법$/, 492], [/^일정$/, 82], [/^세부사업내용$/, 237]].map(([re, x]) => { const L = findLabel(pg, re); return L ? [x, L.x0] : null; }).filter(Boolean);
     const X = fitX(anchors);
     if (h4 && h5) {
@@ -2609,35 +2611,53 @@ const HEAD_VOCAB = [
   [/^(대표자|대표자명|대표자성명)$/, 'org.rep.name'], [/^성명$/, 'NAME'], [/^(연락처|연락처\(핸드폰\)|휴대전화|휴대폰|핸드폰|연락처\(휴대폰\))$/, 'PHONE'],
   [/^(사업자등록번호|사업자번호|고유번호|사업자등록번호\(고유번호\))/, 'org.bizNo'], [/^(보조사업명|사업명|신청사업명|세부사업명)$/, 'name'], [/^(사업기간|보조사업기간)$/, 'period'],
   [/^(직위|직책)$/, 'POS'], [/^(이메일|E-?mail)$/i, 'MAIL'], [/^(사업담당자|담당자|실무책임자)$/, 'P:mgr'],
+  [/^(입금계좌|계좌번호)$/, 'org.bank.account'], [/^(금융기관명|금융기관)$/, 'org.bank.name'], [/^예금종류$/, 'org.bank.type'], [/^(예금주명|예금주)$/, 'org.bank.holder'],
+  [/^(비고|합계)$/, 'IGNORE'],
 ];
+/* 스캔 글자 인식으로 한두 글자 틀린 표 제목('전 번호', '대 a 자')도 알아보기: 핵심 낱말 포함 또는 한 글자 차이 */
+const FUZZY_VOCAB = [['org.bizNo', ['사업자등록번호', '사업자번호', '고유번호', '등록번호']], ['org.bank.account', ['입금계좌', '계좌번호']], ['org.bank.name', ['금융기관명', '금융기관']],
+  ['org.bank.type', ['예금종류']], ['org.bank.holder', ['예금주명', '예금주']], ['org.location', ['소재지주소', '소재지', '주소']], ['PHONE', ['연락처', '핸드폰', '휴대전화', '휴대폰']],
+  ['org.phone', ['전화번호', '번호', '전화']], ['org.rep.name', ['대표자']], ['org.name', ['단체명', '보조단체명']], ['NAME', ['성명']], ['name', ['보조사업명', '사업명']], ['period', ['사업기간']], ['IGNORE', ['비고']]];
+function fuzzyVocab(t) {
+  const n = nz(t).replace(/[:：()]/g, ''), h = n.replace(/[^가-힣]/g, '');
+  if (h.length < 2) return null;
+  for (const [key, kws] of FUZZY_VOCAB) for (const kw of kws) if (h.includes(kw) || (kw.length >= 3 && h.length <= kw.length + 1 && lev(h, kw) <= 1)) return key;
+  return null;
+}
 function tidyWords(s) { // 글자 인식 결과 정리: '김 대 표'→'김대표', 같은 낱말이 연달아 두 번 나오면 하나로, 직인·서명 자리 표시는 버림
   const w = String(s || '').replace(/\(\s*(직인|인|서명|서명\s*또는\s*인)\s*\)/g, ' ').replace(/\s+/g, ' ').trim().split(' ')
     .map(x => /^(?:([가-힣])\1){2,}$/.test(x) ? x.replace(/([가-힣])\1/g, '$1') : x) // '담담읍읍'처럼 글자가 두 번씩 읽힌 경우
     .filter((x, i, a) => x && x !== a[i - 1]);
   const out = [];
   w.forEach(x => { const p = out[out.length - 1]; if (p && x.length === 1 && /[가-힣]/.test(x) && /[가-힣]$/.test(p) && (p.length === 1 || p.single)) { out[out.length - 1] = Object.assign(new String(p + x), {single: true}); } else out.push(x.length === 1 ? Object.assign(new String(x), {single: true}) : x); });
-  return out.map(String).join(' ');
+  return out.map(String).join(' ').replace(/(\d)-\s+(\d)/g, '$1-$2'); // '010-8188- 4063'(칸 안 줄바꿈) → 이어 붙임
 }
 const vocabOf = t => { const n = nz(t).replace(/[:：]$/, ''); const h = HEAD_VOCAB.find(([re]) => re.test(n)); return h ? h[1] : null; };
 function lineCells(l, gap = 14) { // 한 줄의 글자 조각을 가까운 것끼리 묶어 칸 단위로(‘성   명’처럼 띄워 쓴 한 글자들은 더 넓게 묶음)
   const cells = [];
   l.items.forEach(it => {
     const c = cells[cells.length - 1], h = it.y1 - it.y0, wide = c && nz(c.last).length === 1 && nz(it.s).length <= 2 ? Math.max(gap, h * 2) : gap;
-    if (c && it.x0 - c.x1 < wide) { c.t += (it.x0 - c.x1 > 2 && !/\s$/.test(c.t) ? ' ' : '') + it.s; c.x1 = Math.max(c.x1, it.x1); c.last = it.s; } else cells.push({t: it.s, x0: it.x0, x1: it.x1, last: it.s});
+    // 스캔본에서 표 칸을 알면 같은 칸 글자끼리만 묶음(칸 경계가 곧 열 경계)
+    if (c && (it.cell || c.cell ? it.cell === c.cell : it.x0 - c.x1 < wide)) { c.t += (it.x0 - c.x1 > 2 && !/\s$/.test(c.t) ? ' ' : '') + it.s; c.x1 = Math.max(c.x1, it.x1); c.last = it.s; } else cells.push({t: it.s, x0: it.x0, x1: it.x1, last: it.s, cell: it.cell});
   });
-  return cells.map(c => ({...c, v: vocabOf(c.t), cx: (c.x0 + c.x1) / 2}));
+  return cells.map(c => ({...c, v: vocabOf(c.t) || (l.ocr ? fuzzyVocab(c.t) : null), cx: (c.x0 + c.x1) / 2}));
 }
+const junkCell = c => !/[가-힣]{2}/.test(nz(c.t).replace(/[^가-힣]/g, '')); // 글자 인식 잡티(기호·한 글자)
+const sectionStart = l => /^(\d+\.|[○◯□■※ㅇ])/.test(l.n);
 function headerTables(pg) {
   const out = {}, L = pg.lines;
   for (let i = 0; i < L.length; i++) {
     // 이름만 있는 줄들이 이어진 덩어리(제목행)를 찾음 — '대표자' 아래 '성명·연락처'처럼 두세 줄일 수 있음
+    // (스캔본은 잡티 칸은 건너뛰고, 못 읽은 이름 칸이 하나쯤 있어도 이름 칸이 2개 이상이면 제목행으로 봄)
     const block = [];
     for (let j = i; j < L.length && j < i + 4; j++) {
       if (block.length && L[j].y0 - L[block[block.length - 1]].y1 > 18) break;
-      const cs = lineCells(L[j]); if (!cs.length || cs.some(c => !c.v)) break;
+      const cs = lineCells(L[j]); if (!cs.length) break;
+      const named = cs.filter(c => c.v).length, unknown = cs.filter(c => !c.v && !(pg.ocr && junkCell(c))).length;
+      if (!named || unknown > (pg.ocr && named >= 2 ? 1 : 0)) break;
       block.push(j);
     }
-    const cells = block.flatMap(j => lineCells(L[j]).map(c => ({...c, line: j})));
+    const cells = block.flatMap(j => lineCells(L[j]).filter(c => c.v).map(c => ({...c, line: j})));
     // 바로 아래 줄에 좌우로 나뉜 하위 이름이 있으면 상위 이름(예: 대표자 → 성명 | 연락처)
     const isParent = c => { const lows = cells.filter(o => o.line > c.line && Math.abs(o.cx - c.cx) < 85); return lows.some(o => o.cx < c.cx) && lows.some(o => o.cx > c.cx); };
     const leaves = cells.filter(c => !isParent(c));
@@ -2646,36 +2666,54 @@ function headerTables(pg) {
     const parentOf = c => cells.filter(o => o.line < c.line && isParent(o) && Math.abs(o.cx - c.cx) < 85).sort((a, b) => Math.abs(a.cx - c.cx) - Math.abs(b.cx - c.cx))[0];
     const keyOf = c => { const p = parentOf(c), pk = p ? (p.v === 'P:mgr' ? 'mgr' : p.v === 'org.rep.name' ? 'rep' : '') : '';
       if (c.v === 'NAME') return pk === 'mgr' ? 'org.mgr.name' : 'org.rep.name'; if (c.v === 'PHONE') return pk === 'mgr' ? 'org.mgr.phone' : 'org.rep.phone';
-      if (c.v === 'POS') return pk === 'mgr' ? 'org.mgr.position' : null; if (c.v === 'MAIL') return 'org.mgr.email'; return c.v; };
+      if (c.v === 'POS') return pk === 'mgr' ? 'org.mgr.position' : null; if (c.v === 'MAIL') return 'org.mgr.email'; if (c.v === 'IGNORE') return null; return c.v; };
     fields.sort((a, b) => a.cx - b.cx);
     const bounds = fields.map((c, k) => [k ? (fields[k - 1].cx + c.cx) / 2 : c.x0 - 60, k < fields.length - 1 ? (c.cx + fields[k + 1].cx) / 2 : c.x1 + 120]);
-    const last = block[block.length - 1], vl = L.slice(last + 1).find(l => l.y0 > L[last].y1 - 1 && l.y0 - L[last].y1 < 40 && lineCells(l).some(c => !c.v));
-    if (!vl) { i = last; continue; }
-    const runs = lineCells(vl, 12); // 값 줄은 가까운 낱말끼리 한 칸으로 묶은 뒤 칸의 가운데로 열을 정함(주소처럼 여러 낱말인 값)
+    // 값은 제목행 바로 아래 줄부터 — '새솔동 / 요진와이시티 / 경로당'처럼 한 칸에 여러 줄일 수 있어 이어지는 줄을 모두 모음
+    const last = block[block.length - 1], vals = [];
+    for (const l of L.slice(last + 1)) {
+      const prev = vals.length ? vals[vals.length - 1] : L[last];
+      if (l.y0 - prev.y1 > (vals.length ? 16 : 40)) break;
+      if (vals.length && (sectionStart(l) || lineCells(l).filter(c => c.v).length >= 2)) break;
+      if (!vals.length && !lineCells(l).some(c => !c.v)) continue;
+      vals.push(l);
+    }
+    if (!vals.length) { i = last; continue; }
     fields.forEach((c, k) => {
       const key = keyOf(c); if (!key) return;
-      const t = tidyWords(runs.filter(r => r.cx >= bounds[k][0] && r.cx < bounds[k][1]).map(r => r.t).join(' '));
+      const t = tidyWords(vals.map(vl => lineCells(vl, 12).filter(r => r.cx >= bounds[k][0] && r.cx < bounds[k][1]).map(r => r.t).join(' ')).filter(Boolean).join(' '));
       if (t && !vocabOf(t) && out[key] == null) out[key] = t;
     });
     i = last;
   }
   return out;
 }
-/* "○ 사 업 명 : …" 처럼 이름 뒤 쌍점(:) 다음에 값이 있는 줄 */
+/* "○ 사 업 명 : …", "1. 보조 사업명 : …" 처럼 이름 뒤 쌍점(:) 다음에 값이 있는 줄(목적·내용은 아래로 이어지는 줄까지) */
 function colonPairs(pg) {
-  const out = {}, M = [[/^○?(사업명|보조사업명)$/, 'name'], [/^○?사업기간$/, 'period'], [/^○?사업장소$/, 'place'], [/^○?사업목적$/, 'purpose'], [/^○?사업내용$/, 'content'], [/^○?(단체명)$/, 'org.name']];
-  pg.lines.forEach(l => {
-    const m = l.t.match(/^\s*(.+?)\s*[:：]\s*(.+)$/); if (!m) return;
-    const hit = M.find(([re]) => re.test(nz(m[1]))); if (!hit || out[hit[1]] != null) return;
-    const v = tidyWords(m[2]); if (v && !vocabOf(v)) out[hit[1]] = v;
+  const out = {}, M = [[/^(보조)?(사업명|신청사업명)$/, 'name'], [/^(보조)?사업기간$/, 'period'], [/^(보조)?사업장소$/, 'place'], [/^(보조)?사업목적$/, 'purpose'],
+    [/^(보조)?사업내용$/, 'content'], [/^단체명$/, 'org.name'], [/^대표자$/, 'org.rep.name']];
+  const L = pg.lines;
+  L.forEach((l, li) => {
+    const m = l.t.match(/^\s*(.+?)\s*[:：=]\s*(.+)$/); if (!m) return;
+    const lab = nz(m[1]).replace(pg.ocr ? /^(\d+\.|[○◯·∙ㆍㅇ(O0o으'‘])+/ : /^(\d+\.|[○◯·∙ㅇ(])+/, '').replace(/\)$/, ''); // 스캔본은 ○가 O·0·으로 읽히기도 함
+    let hit = M.find(([re]) => re.test(lab));
+    if (!hit && pg.ocr) hit = M.find(([re]) => { const t = plainLabel(new RegExp(re.source.replace('(보조)?', '').replace(/\((\w|[가-힣|])+\)/, ''))); return t && t.length >= 3 && lev(lab.replace(/^보조/, ''), t) <= 1; });
+    if (!hit || out[hit[1]] != null) return;
+    let v = m[2].split(/\s(?:대\s*표\s*자|성\s*명|직\s*책|담\s*당\s*자)\s*[:：]/)[0].replace(/\)\s*$/, '');
+    if (/purpose|content/.test(hit[1])) { // 들여 쓴 다음 줄들이 같은 내용이면 이어 붙임
+      const x0 = l.items[0].x0;
+      for (let k = li + 1; k < L.length && k < li + 4; k++) { const n2 = L[k]; if (n2.y0 - L[k - 1].y1 > 14 || sectionStart(n2) || /[:：]/.test(n2.t) || n2.items[0].x0 < x0 + 8) break; v += '\n' + n2.t; }
+    }
+    v = v.split('\n').map(tidyWords).filter(Boolean).join('\n');
+    if (v && !vocabOf(v)) out[hit[1]] = v;
   });
   return out;
 }
 function classify(pg) {
   const head = pg.lines.slice(0, 14).map(l => l.n).join('|'), all = pg.lines.map(l => l.n).join('|');
   if (/지방보조금지원신청서/.test(head)) return 'f1';
-  if (/사업계획서/.test(head) && !/최종/.test(head) && /신청단체/.test(all)) return 'f1_1a';
-  if (/일정별세부수행계획/.test(all) && /사업비집행계획/.test(all) && /보조금신청내역/.test(all)) return 'f1_1b';
+  if (/사업계획서|업계획서|사업계획/.test(head) && !/최종/.test(head) && /신청단체|청단체|단체구성/.test(all)) return 'f1_1a';
+  if ([/세부수행계획|일정별/, /사업비집행|집행계획/, /신청내역|보조금신청/].filter(re => re.test(all)).length >= 2) return 'f1_1b';
   if (/보조금외경비부담내역/.test(head)) return 'f1_3';
   return null;
 }
@@ -2686,19 +2724,24 @@ async function parseApplicationPdf(file, onProg, forceOcr) {
   if (pay && pay.org && pay.project) return {source: 'data', org: pay.org, project: pay.project, notes: ['이 프로그램에서 만든 PDF라서 입력 내용을 그대로 불러왔습니다.']};
   const textChars = pages.reduce((s, p) => s + p.lines.reduce((t, l) => t + l.n.length, 0), 0);
   // 글자가 있어도 서식을 하나도 못 알아보면(글꼴이 깨진 PDF 등) 글자 인식으로 전환
-  const generic = pages.map(pg => ({...colonPairs(pg), ...headerTables(pg)})); // 제목행 표(값이 아래 칸)·'이름 : 값' 줄
-  const genericN = generic.reduce((s, g) => s + Object.keys(g).length, 0);
+  let generic = pages.map(pg => ({...colonPairs(pg), ...headerTables(pg)})); // 제목행 표(값이 아래 칸)·'이름 : 값' 줄
+  let genericN = generic.reduce((s, g) => s + Object.keys(g).length, 0);
+  // 글자가 있어도 서식을 하나도 못 알아보면(글꼴이 깨진 PDF 등) 글자 인식으로 전환
   const noForm = textChars >= 30 && !pages.some(pg => classify(pg)) && genericN < 2;
-  if (textChars < 30 || forceOcr || noForm) { // 스캔 PDF → 서식 칸별 글자 인식
-    const r = await ocrForms(doc, onProg);
-    const names = {f1: '서식1 지원신청서', f1_1a: '서식1-1 사업계획서', f1_1b: '서식1-1 사업계획서(사업비 등)', f1_3: '서식1-3 경비부담내역', table: '표(항목 이름 아래 칸의 값)'};
-    if (!r.used.length) return {source: 'none', org: {}, project: {}, notes: ['스캔 PDF에서 지원신청서·사업계획서·경비부담내역 서식을 찾지 못했습니다. 더 선명하게(300dpi 이상, 똑바로) 스캔해 보세요.']};
-    return {source: 'ocr', org: r.org, project: r.project, notes: ['스캔 PDF라서 서식 칸마다 글자 인식(OCR)으로 읽었습니다. 글자가 틀리거나 빠질 수 있으니 원본과 꼭 비교하세요.',
-      `읽은 서식: ${r.used.map(u => names[u]).join(', ')}`, ...(r.weak ? ['일부 쪽은 위치 맞춤 기준을 충분히 찾지 못해 칸이 어긋났을 수 있습니다.'] : [])]};
+  if (textChars < 30 || forceOcr || noForm) { // 스캔 PDF → 쪽 전체 글자 인식 후 같은 방식으로 읽음
+    pages = await ocrPages(doc, onProg); scanned = true;
+    if (pages.reduce((s, p) => s + p.lines.length, 0) < 5) return {source: 'none', org: {}, project: {}, notes: ['스캔 PDF에서 글자를 인식하지 못했습니다. 더 선명하게(300dpi 이상, 똑바로) 스캔해 보세요.']};
+    generic = pages.map(pg => ({...colonPairs(pg), ...headerTables(pg)}));
+    genericN = generic.reduce((s, g) => s + Object.keys(g).length, 0);
   }
   const org = {}, project = {}, notes = scanned ? ['스캔 PDF라서 글자 인식(OCR)으로 읽었습니다. 글자가 틀리거나 빠질 수 있으니 원본과 꼭 비교하세요.'] : [], used = [];
   const put = (k, v) => {
-    if (v === '' || v == null || (typeof v === 'string' && vocabOf(v))) return; // 값 자리에 항목 이름이 들어간 경우는 버림
+    if (v === '' || v == null || (typeof v === 'string' && (vocabOf(v) || /동\s*의|합니다|[□■]/.test(v)))) return; // 값 자리에 항목 이름·동의 체크란이 들어간 경우는 버림
+    // 모양이 맞지 않는 값은 버림(전화번호에 글자, 이메일에 @ 없음 등) / 이름 앞뒤 잡티 정리
+    if (/phone$/.test(k) && !/\d{2,4}\D{0,2}\d{3,4}\D{0,2}\d{4}/.test(v)) return;
+    if (/email$/.test(k) && !/@/.test(v)) return;
+    if (/bizNo$|account$/.test(k) && !/\d{3}/.test(v)) return;
+    if (typeof v === 'string' && /(\.name|holder)$/.test(k)) { v = v.replace(/^[^가-힣A-Za-z0-9(]+|[^가-힣A-Za-z0-9)]+$/g, ''); if (!v) return; }
     if (k === 'period') { const pr = toPeriod(v); if (pr.start && isBlank(project.start)) { project.start = pr.start; project.end = pr.end; } return; }
     if (k.startsWith('org.')) { if (isBlank(getP(org, k.slice(4)))) setP(org, k.slice(4), v); }
     else if (isBlank(project[k]) || (Array.isArray(v) && !(project[k] || []).length)) project[k] = v;
